@@ -37,6 +37,16 @@ class PlanParams:
     keepout_inflate_m: float
     crosscut: bool
     grid_cell_m: float = 0.2
+    # Extra inset at each stripe end, on top of body_clearance_m. Set this to
+    # ~R_min for Ackermann platforms so the U-turn between rows fits without
+    # crossing the boundary. Zero for diff-drive (pivot-in-place is free).
+    headland_m: float = 0.0
+    # Stripe overlap as a fraction of deck_m. 0 = stripes touch, 0.1 = 10%
+    # overlap (effective spacing = 0.9·deck_m). Clamped to [0, 0.5].
+    overlap_pct: float = 0.0
+    # Direction of the primary stripe pass: "h" = east-west, "v" = north-south.
+    # The crosscut (if enabled) runs perpendicular to this.
+    primary_axis: str = "h"
 
 
 def _stripes(
@@ -45,8 +55,17 @@ def _stripes(
     deck_m: float,
     inflate_m: float,
     axis: str,
+    end_inset_m: float | None = None,
 ) -> list[list[Point]]:
-    """Return a serpentine list of segments along the chosen axis."""
+    """Return a serpentine list of segments along the chosen axis.
+
+    ``inflate_m`` controls the keep-out projection margin. ``end_inset_m`` (if
+    provided) overrides how much each stripe is trimmed at the boundary ends —
+    use this to leave headland space for an Ackermann U-turn. Defaults to
+    ``inflate_m`` (legacy behavior).
+    """
+    if end_inset_m is None:
+        end_inset_m = inflate_m
     x0, y0, x1, y1 = bbox(boundary)
     if axis == "h":
         v0, v1 = y0, y1
@@ -76,8 +95,13 @@ def _stripes(
             for c0, c1 in ko_proj(ko, v):
                 cuts.append((c0 - margin, c1 + margin))
         ivals = subtract_intervals(ivals, cuts)
-        # Trim each interval by inflate_m at each end (boundary clearance).
-        ivals = [(a + inflate_m, b - inflate_m) for a, b in ivals if (b - inflate_m) > (a + inflate_m)]
+        # Trim each interval by end_inset_m at each end. The inset combines
+        # boundary body-clearance with optional Ackermann headland room.
+        ivals = [
+            (a + end_inset_m, b - end_inset_m)
+            for a, b in ivals
+            if (b - end_inset_m) > (a + end_inset_m)
+        ]
         if direction < 0:
             ivals = [(b, a) for a, b in reversed(ivals)]
         for a, b in ivals:
@@ -183,11 +207,23 @@ def plan_coverage(
     """Build the full waypoint list for the mission."""
     inflate = params.body_clearance_m
     drivable = DrivableMask(boundary, keepouts, cell_m=params.grid_cell_m, inflate_m=inflate)
+    end_inset = inflate + max(0.0, params.headland_m)
+
+    # Effective stripe spacing with overlap. Clamp overlap to a sane range so
+    # the planner never produces zero-spacing infinite-loop output.
+    overlap = max(0.0, min(0.5, float(params.overlap_pct)))
+    spacing = max(0.05, params.deck_m * (1.0 - overlap))
+
+    primary = params.primary_axis if params.primary_axis in ("h", "v") else "h"
+    secondary = "v" if primary == "h" else "h"
 
     waypoints: list[Point] = []
 
     def append_pass(axis: str) -> None:
-        segments = _stripes(boundary, keepouts, params.deck_m, inflate, axis)
+        segments = _stripes(
+            boundary, keepouts, spacing, inflate, axis,
+            end_inset_m=end_inset,
+        )
         last: Point | None = None
         for seg in segments:
             if last is not None and last != seg[0]:
@@ -199,9 +235,9 @@ def plan_coverage(
             waypoints.append(seg[1])
             last = seg[1]
 
-    append_pass("h")
+    append_pass(primary)
     if params.crosscut:
-        append_pass("v")
+        append_pass(secondary)
 
     # Drop consecutive duplicates introduced by joins.
     deduped: list[Point] = []

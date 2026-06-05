@@ -1,0 +1,120 @@
+platform: ackermann
+
+# ---- simulation -----------------------------------------------------------
+# When enabled, every hardware leaf (I2C/UART/pigpio/PiSugar socket) is
+# swapped for a virtual driver that talks to a shared SimWorld. Run on
+# Windows/macOS/Linux with no Pi attached.
+sim:
+  enabled: true
+  origin:                # lat/lon anchor for the local ENU plane
+    lat: 45.5017
+    lon: -73.5673
+  start:                 # initial rover pose in ENU meters
+    x: 0.8                # near first stripe west end; inside body_clearance+headland inset
+    y: 0.6                # aligned with first stripe (deck_m/2)
+    theta_deg: 0.0        # facing east — along the stripe direction
+  world_v_max: 1.2       # m/s at 100% duty — matches drive.v_max so duty→speed is 1:1
+  motor_tau_s: 0.15      # first-order motor lag (s)
+  gps_noise_m: 0.02      # std-dev injected before lat/lon conversion (RTK-fixed grade)
+  gps_quality: 4         # 0 invalid · 1 single · 2 DGPS · 4 RTK-fixed · 5 RTK-float
+  gps_period_s: 1.0      # the real LC29H DA is 1 Hz
+  imu_noise_rad: 0.003   # ~0.17° std-dev yaw noise
+  battery_start_pct: 95.0
+  battery_drain_pct_per_min: 0.05
+  seed: 42
+
+logging:
+  dir: ./logs            # JSONL telemetry under here (created if missing)
+
+# ---- everything below is identical to config.yaml --------------------------
+
+control:
+  ctrl_hz: 20
+  v_nominal: 0.45
+  reach_m: 0.22
+  max_steer_deg: 30
+  pure_pursuit:
+    enabled: true
+    lookahead_m: 0.6
+  pid:
+    kp: 3.0
+    ki: 0.30
+    kd: 0.35
+    imax: 1.0
+
+geometry:
+  wheelbase_m: 0.25
+  steer_max_deg: 30
+  # R_min = wheelbase / tan(steer_max) ≈ 0.43 m → U-turn between rows needs
+  # ≥ 2·R_min lateral space. 1.2 m gives U-turn radius 0.6 m (0.17 m of slack
+  # vs R_min) which the controller can follow even with GPS noise and dead-
+  # reckon drift. The planner's headland adds R_min + 0.05 m end-inset on top.
+  deck_m: 1.2
+  body_clearance_m: 0.12
+
+drive:
+  pca9685_addr: 0x40
+  pwm_hz: 1000
+  motor_rear:  {pwm_ch: 0, in1_ch: 1, in2_ch: 2}
+  motor_front: {pwm_ch: 5, in1_ch: 3, in2_ch: 4}
+  drive_both: true
+  v_max: 1.2
+  deadband: 0.08
+  invert_rear: false
+  invert_front: false
+
+steering:
+  gpio_pin: 18
+  pwm_hz: 50
+  us_center: 1500
+  us_min: 1000
+  us_max: 2000
+  invert: false
+
+gnss:
+  port: SIM
+  baud: 115200
+  min_fix_quality: 4
+  fix_max_age_s: 3.0
+
+ntrip:
+  host: ""
+  port: 2101
+  mountpoint: ""
+  user: ""
+  password: ""
+
+estimator:
+  gps_blend_alpha: 0.5
+  imu_yaw_offset_deg: 0.0
+
+safety:
+  geo_margin_m: 0.5
+  return_pct: 25
+  stop_pct: 12
+  degrade_sec: 5
+  motor_timeout_ms: 300
+
+ui:
+  port: 8080
+  push_hz: 10
+
+teleop:
+  deadman_ms: 300
+  manual_v_max: 0.35
+  manual_steer_deg: 30
+  enforce_geofence: true
+
+stuck:
+  window_s: 20
+  min_progress_m: 0.3
+  recovery_tries: 2
+  giveup_s: 60
+
+teach:
+  sample_m: 0.25
+  simplify_m: 0.15
+  loop_min_perimeter_m: 2.0
+  loop_closure_m: 0.5
+  auto_confirm_closure: false
+  boundary_inset_m: 0.12

@@ -60,6 +60,36 @@ def polyline_length(pts: list[Point]) -> float:
     return sum(dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
 
 
+def point_to_segment_dist(p: Point, a: Point, b: Point) -> float:
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return dist(p, a)
+    t = ((p[0] - ax) * dx + (p[1] - ay) * dy) / L2
+    t = max(0.0, min(1.0, t))
+    return dist(p, (ax + t * dx, ay + t * dy))
+
+
+def signed_distance_to_polygon(p: Point, poly: Polygon) -> float:
+    """Positive when ``p`` is inside ``poly``, negative when outside.
+
+    Magnitude is the distance to the nearest polygon edge. Used by the safety
+    monitor's geofence so transient noise-driven breaches can be absorbed by a
+    configured margin.
+    """
+    if not poly or len(poly) < 3:
+        return float("inf")
+    min_d = float("inf")
+    n = len(poly)
+    for i in range(n):
+        d = point_to_segment_dist(p, poly[i], poly[(i + 1) % n])
+        if d < min_d:
+            min_d = d
+    return min_d if point_in_polygon(p, poly) else -min_d
+
+
 def douglas_peucker(pts: list[Point], eps: float) -> list[Point]:
     """Simplify a polyline to within eps meters."""
     if len(pts) < 3:

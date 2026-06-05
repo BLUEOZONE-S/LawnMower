@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from ..config import SafetyCfg
 from ..estimator import Estimator
-from ..nav.geometry import Polygon, point_in_polygon
+from ..nav.geometry import Polygon, point_in_polygon, signed_distance_to_polygon
 from ..power.pisugar import PiSugar
 
 
@@ -128,15 +128,18 @@ class SafetyMonitor:
         else:
             self._degrade_since = None
 
-        # Geofence
+        # Geofence — trip only if pose is OUTSIDE the boundary by more than
+        # cfg.geo_margin_m. The margin absorbs transient GPS/dead-reckon noise
+        # so the rover doesn't safety-trip on a 2 cm jitter at the edge.
         boundary = self._boundary_provider()
-        if boundary is not None:
+        if boundary and len(boundary) >= 3:
             pose = self.est.snapshot()
-            inside = point_in_polygon((pose.x, pose.y), boundary)
+            sd = signed_distance_to_polygon((pose.x, pose.y), boundary)
+            inside = sd > -self.cfg.geo_margin_m  # within margin counts as inside
             with self._lock:
                 self.state.pose_inside_geofence = inside
             if not inside:
-                self.request_stop("geofence breach")
+                self.request_stop(f"geofence breach ({-sd:.2f}m outside)")
                 return
 
         # Watchdog: control loop heartbeat.

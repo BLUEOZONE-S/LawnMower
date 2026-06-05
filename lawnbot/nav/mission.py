@@ -70,8 +70,14 @@ class Mission:
                 self.status.state = State.PAUSED
 
     def resume(self) -> None:
+        """Exit PAUSED / MANUAL / STUCK back into AUTO.
+
+        Always snaps to the nearest not-yet-covered waypoint so a clean restart
+        after the operator drove the rover free of an obstacle doesn't chase a
+        stale target that's no longer reachable from the current pose.
+        """
         with self._lock:
-            if self.status.state in (State.PAUSED, State.MANUAL):
+            if self.status.state in (State.PAUSED, State.MANUAL, State.STUCK):
                 self._snap_to_nearest_locked()
                 self.status.state = State.AUTO
                 self.status.note = ""
@@ -97,6 +103,16 @@ class Mission:
         with self._lock:
             if self.status.state == State.RECOVER:
                 self.status.state = State.AUTO
+
+    def update_pose(self, pose: Pose) -> None:
+        """Refresh the cached pose used by ``resume()``'s nearest-waypoint snap.
+
+        ``mission.update()`` already does this on every AUTO/RECOVER tick, but
+        in MANUAL / STUCK / PAUSED the operator may move the rover via teleop —
+        without this hook ``resume()`` would snap to a stale pre-stuck pose.
+        """
+        with self._lock:
+            self._last_pose = pose
 
     def update(self, pose: Pose) -> tuple[Point | None, bool]:
         """Advance waypoint if within reach. Returns (current_target, done)."""

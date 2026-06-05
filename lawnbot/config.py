@@ -151,6 +151,36 @@ class TeachCfg:
 
 
 @dataclass(frozen=True)
+class SimCfg:
+    """Simulation backend — virtual world parameters.
+
+    All fields have sensible defaults so existing config.yaml files without a
+    ``sim:`` block keep working with simulation disabled.
+    """
+
+    enabled: bool = False
+    origin_lat: float = 45.5017
+    origin_lon: float = -73.5673
+    start_x: float = 1.0          # initial ENU east (m)
+    start_y: float = 1.0          # initial ENU north (m)
+    start_theta_deg: float = 0.0  # initial heading (deg, 0 = +east)
+    world_v_max: float = 1.2      # m/s at 100% duty (match drive.v_max)
+    motor_tau_s: float = 0.15     # first-order motor lag
+    gps_noise_m: float = 0.02     # std-dev added to true (x,y) before conversion
+    gps_quality: int = 4          # 4 = RTK-fixed
+    gps_period_s: float = 1.0
+    imu_noise_rad: float = 0.003
+    battery_start_pct: float = 95.0
+    battery_drain_pct_per_min: float = 0.05
+    seed: int = 42
+
+
+@dataclass(frozen=True)
+class LoggingCfg:
+    dir: str = "./logs"
+
+
+@dataclass(frozen=True)
 class Config:
     platform: str
     control: ControlCfg
@@ -165,6 +195,8 @@ class Config:
     teleop: TeleopCfg
     stuck: StuckCfg
     teach: TeachCfg
+    sim: SimCfg = SimCfg()
+    logging: LoggingCfg = LoggingCfg()
 
 
 def _channels(d: dict) -> MotorChannels:
@@ -207,4 +239,38 @@ def load(path: str | Path = "config.yaml") -> Config:
         teleop=TeleopCfg(**raw["teleop"]),
         stuck=StuckCfg(**raw["stuck"]),
         teach=TeachCfg(**raw["teach"]),
+        sim=_sim_cfg(raw.get("sim")),
+        logging=_logging_cfg(raw.get("logging")),
     )
+
+
+def _sim_cfg(raw: dict | None) -> SimCfg:
+    if not raw:
+        return SimCfg()
+    origin = raw.get("origin") or {}
+    start = raw.get("start") or {}
+    return SimCfg(
+        enabled=bool(raw.get("enabled", False)),
+        origin_lat=float(origin.get("lat", SimCfg.origin_lat)),
+        origin_lon=float(origin.get("lon", SimCfg.origin_lon)),
+        start_x=float(start.get("x", SimCfg.start_x)),
+        start_y=float(start.get("y", SimCfg.start_y)),
+        start_theta_deg=float(start.get("theta_deg", SimCfg.start_theta_deg)),
+        world_v_max=float(raw.get("world_v_max", SimCfg.world_v_max)),
+        motor_tau_s=float(raw.get("motor_tau_s", SimCfg.motor_tau_s)),
+        gps_noise_m=float(raw.get("gps_noise_m", SimCfg.gps_noise_m)),
+        gps_quality=int(raw.get("gps_quality", SimCfg.gps_quality)),
+        gps_period_s=float(raw.get("gps_period_s", SimCfg.gps_period_s)),
+        imu_noise_rad=float(raw.get("imu_noise_rad", SimCfg.imu_noise_rad)),
+        battery_start_pct=float(raw.get("battery_start_pct", SimCfg.battery_start_pct)),
+        battery_drain_pct_per_min=float(
+            raw.get("battery_drain_pct_per_min", SimCfg.battery_drain_pct_per_min)
+        ),
+        seed=int(raw.get("seed", SimCfg.seed)),
+    )
+
+
+def _logging_cfg(raw: dict | None) -> LoggingCfg:
+    if not raw:
+        return LoggingCfg()
+    return LoggingCfg(dir=str(raw.get("dir", LoggingCfg.dir)))

@@ -728,17 +728,101 @@ LawnMower/
 
 ---
 
-## 11. Dev-box tests (Windows)
+## 11. Dev-box (Windows / macOS / Linux) — simulation mode
 
-Pure-math modules import and test on Windows without any hardware:
+The whole stack runs on a dev box with **no Pi hardware attached** via a built-in
+simulation backend. The control loop, planner, estimator, UI, teach flow, teleop,
+safety monitor — all run unchanged. Only the leaf drivers (I2C / UART / pigpio /
+PiSugar socket) are swapped for sim equivalents that talk to a shared virtual
+Ackermann world. Use it to develop the controller, validate planner changes,
+demo the UI, or work on a flight without a Pi.
+
+### 11.1 One-time setup
 
 ```powershell
 cd C:\GITHUB\LawnMower
 python -m pip install -r requirements.txt
+```
+
+On Windows, `uvloop` (a Linux-only uvicorn extra) is skipped automatically by
+pip's platform markers — the runtime falls back to the stdlib asyncio loop. The
+hardware-only deps (`pigpio`, `smbus2`, `pygnssutils`) install as pure-Python
+client libraries but are never actually exercised in sim mode.
+
+### 11.2 Launch the simulator
+
+```powershell
+python -m lawnbot.main --sim
+```
+
+That's it. The `--sim` flag is a shortcut for `--config config.sim.yaml`. On
+startup you'll see:
+
+```
+config loaded from config.sim.yaml — sim=True ctrl_hz=20 ui_port=8080
+opening hardware backend
+hardware backend: SIMULATION
+boundary loaded: 4 pts, 1 keep-outs       # boundary.sim.yaml auto-loaded
+SCHED_FIFO unavailable: ...               # expected — POSIX-only
+control thread started
+Uvicorn running on http://0.0.0.0:8080
+```
+
+Open `http://localhost:8080` in any browser. The dashboard, map, telemetry,
+mission controls, teleop joystick, teach flow, and live PID/lookahead sliders
+all work identically to a real Pi run — the canvas just draws the virtual rover
+crossing the sample lawn defined in `boundary.sim.yaml`.
+
+### 11.3 What the simulator models
+
+| Layer | Behavior |
+|---|---|
+| Drive | Both motors take a signed duty in `[-1, +1]`. First-order motor lag (`sim.motor_tau_s ≈ 0.15s`) toward `duty × world_v_max`. |
+| Steering | Servo angle clamped to `geometry.steer_max_deg` — the rover **cannot pivot in place** (real Ackermann constraint). |
+| Kinematics | Bicycle model: `ẋ = v·cos θ`, `ẏ = v·sin θ`, `θ̇ = v·tan δ / wheelbase`. |
+| GPS | One fix per `sim.gps_period_s` (default 1 Hz), `quality = 4` (RTK-fixed), Gaussian XY noise (`sim.gps_noise_m`). |
+| IMU | Returns world yaw + Gaussian noise (`sim.imu_noise_rad`). |
+| Odometry | Returns the signed distance traveled since the last `read_delta_m()`. |
+| Battery | Starts at `sim.battery_start_pct`, drains at `sim.battery_drain_pct_per_min`. |
+
+The motor watchdog, deadman, geofence, RTK-age trip, and stuck detector all
+behave identically in sim — useful for proving the safety chain end-to-end
+without bricking a real rover.
+
+### 11.4 Sim configuration knobs
+
+Edit `config.sim.yaml`:
+
+```yaml
+sim:
+  enabled: true
+  origin: {lat: 45.5017, lon: -73.5673}   # lat/lon anchor for the ENU plane
+  start: {x: 1.0, y: 1.0, theta_deg: 0.0} # initial rover pose (ENU meters)
+  world_v_max: 1.2          # m/s at 100% duty
+  motor_tau_s: 0.15
+  gps_noise_m: 0.02         # std-dev — try 0.5 to feel DGPS-grade drift
+  gps_quality: 4            # 2 DGPS · 4 RTK-fixed · 5 RTK-float
+  imu_noise_rad: 0.003
+  seed: 42                  # fix for reproducible runs
+```
+
+### 11.5 Sample lawn
+
+`boundary.sim.yaml` ships a 10 m × 8 m rectangle with a triangular keep-out
+roughly in the middle, anchored to the same lat/lon as `config.sim.yaml`. The
+Runtime auto-loads it when `boundary.yaml` doesn't exist, so the first run is
+"open browser → click Plan → click Start". To teach a fresh lawn instead,
+delete or rename `boundary.sim.yaml` and use the **Teach** controls in the UI
+to drive the perimeter manually via the joystick.
+
+### 11.6 Pure-math tests
+
+```powershell
 python -m pytest tests/
 ```
 
-Hardware modules (`pca9685.py`, `servo.py`, `lc29h.py`, `sensors/*`, `gnss/ntrip.py`) guard their imports so the package still loads on Windows — instantiating those classes raises a clear error, but `import lawnbot.*` works fine for syntax checks and unit tests.
+These exercise the planner, estimator, mission, geometry, and controller —
+hardware-free and Windows-native.
 
 ---
 

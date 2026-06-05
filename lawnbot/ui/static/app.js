@@ -248,30 +248,513 @@
   joy.addEventListener('pointerup', () => { joyDrag = false; resetStick(); });
   joy.addEventListener('pointercancel', () => { joyDrag = false; resetStick(); });
 
-  // ---- keyboard teleop (arrows / WASD) -------------------------------
-  const keys = { v: 0, d: 0 };
-  function pushKey() { send('teleop', { v: keys.v, delta: keys.d }); teleopHB = performance.now(); }
+  // ---- keyboard teleop (WASD / arrows + Shift modifier + Space) -------
+  // Track key state so each modifier change re-pushes the current command.
+  const keysDown = { fwd: false, back: false, left: false, right: false, slow: false };
+
+  // Don't steal keys while the user is typing into an input/textarea or
+  // dragging a slider — that would block normal page interaction.
+  function isTypingTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+      const t = (el.type || '').toLowerCase();
+      // Range sliders still want to ignore drive keys — return true so we skip.
+      return true;
+    }
+    return el.isContentEditable === true;
+  }
+
+  function buildCmd() {
+    // Magnitudes — fast by default; Shift halves them for fine positioning.
+    const fast = !keysDown.slow;
+    const fwdMag = fast ? 0.9 : 0.4;
+    const backMag = fast ? 0.6 : 0.3;
+    const steerMag = fast ? 0.9 : 0.4;
+    let v = 0, d = 0;
+    if (keysDown.fwd) v += fwdMag;
+    if (keysDown.back) v -= backMag;
+    if (keysDown.left) d -= steerMag;
+    if (keysDown.right) d += steerMag;
+    return { v, delta: d };
+  }
+
+  function pushKey() {
+    const c = buildCmd();
+    send('teleop', c);
+    teleopHB = performance.now();
+  }
+
+  // Decode key → boolean state delta. Returns true if we handled it.
+  function decodeKey(e, down) {
+    if (e.repeat) return false;
+    const k = e.key;
+    const code = e.code;
+    switch (k) {
+      case 'ArrowUp':    case 'w': case 'W': keysDown.fwd = down; return true;
+      case 'ArrowDown':  case 's': case 'S': keysDown.back = down; return true;
+      case 'ArrowLeft':  case 'a': case 'A': keysDown.left = down; return true;
+      case 'ArrowRight': case 'd': case 'D': keysDown.right = down; return true;
+      case 'Shift':                          keysDown.slow = down; return true;
+      case ' ':                              // Space = panic brake
+        if (down) {
+          keysDown.fwd = keysDown.back = keysDown.left = keysDown.right = false;
+        }
+        return true;
+    }
+    if (code === 'Space') {
+      if (down) {
+        keysDown.fwd = keysDown.back = keysDown.left = keysDown.right = false;
+      }
+      return true;
+    }
+    return false;
+  }
+
   document.addEventListener('keydown', e => {
-    if (e.repeat) return;
-    if (e.key === 'ArrowUp' || e.key === 'w') keys.v = 0.4;
-    else if (e.key === 'ArrowDown' || e.key === 's') keys.v = -0.3;
-    else if (e.key === 'ArrowLeft' || e.key === 'a') keys.d = -0.5;
-    else if (e.key === 'ArrowRight' || e.key === 'd') keys.d = 0.5;
-    else return;
-    pushKey();
+    if (isTypingTarget(e.target)) return;
+    if (decodeKey(e, true)) {
+      e.preventDefault();      // stop Space from scrolling the page
+      pushKey();
+    }
   });
   document.addEventListener('keyup', e => {
-    if (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'w' || e.key === 's') keys.v = 0;
-    else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'a' || e.key === 'd') keys.d = 0;
-    else return;
-    pushKey();
+    if (isTypingTarget(e.target)) return;
+    if (decodeKey(e, false)) {
+      e.preventDefault();
+      pushKey();
+    }
+  });
+  // If the window loses focus mid-drive, clear keys so the rover doesn't keep
+  // executing the last command past the deadman.
+  window.addEventListener('blur', () => {
+    let any = false;
+    for (const k of Object.keys(keysDown)) {
+      if (keysDown[k]) any = true;
+      keysDown[k] = false;
+    }
+    if (any) pushKey();
   });
 
-  // Heartbeat repeater: send the current teleop command at 10 Hz while a key/stick is engaged.
+  // Heartbeat repeater: keep the deadman happy while ANY direction is held.
   setInterval(() => {
-    if ((keys.v !== 0 || keys.d !== 0) || joyDrag) pushKey();
+    const moving = keysDown.fwd || keysDown.back || keysDown.left || keysDown.right;
+    if (moving || joyDrag) pushKey();
   }, 100);
 
   // Double-click recenters and re-engages follow mode.
   canvas.addEventListener('dblclick', () => { view.follow = true; });
+
+  // ---- Sim speed slider ------------------------------------------------
+  const simSpeed = document.getElementById('sim-speed');
+  const simSpeedVal = document.getElementById('sim-speed-val');
+  if (simSpeed) {
+    let lastSent = 1.0;
+    simSpeed.addEventListener('input', () => {
+      simSpeedVal.textContent = parseFloat(simSpeed.value).toFixed(2);
+    });
+    simSpeed.addEventListener('change', () => {
+      const v = parseFloat(simSpeed.value);
+      if (Math.abs(v - lastSent) > 1e-6) {
+        lastSent = v;
+        send('sim.speed', { scale: v });
+      }
+    });
+  }
+
+  // ---- Cut pattern controls -------------------------------------------
+  const patDeck = document.getElementById('pat-deck');
+  const patOverlap = document.getElementById('pat-overlap');
+  const patHeadland = document.getElementById('pat-headland');
+  const patAxis = document.getElementById('pat-axis');
+  const patCross = document.getElementById('pat-cross');
+  const patApply = document.getElementById('pat-apply');
+  const patStatus = document.getElementById('pat-status');
+  function bindRange(input, valSpan, digits) {
+    if (!input || !valSpan) return;
+    input.addEventListener('input', () => { valSpan.textContent = parseFloat(input.value).toFixed(digits); });
+  }
+  bindRange(patDeck, document.getElementById('pat-deck-val'), 2);
+  bindRange(patOverlap, document.getElementById('pat-overlap-val'), 0);
+  bindRange(patHeadland, document.getElementById('pat-headland-val'), 2);
+  if (patApply) {
+    patApply.addEventListener('click', () => {
+      const payload = {
+        deck_m: parseFloat(patDeck.value),
+        overlap_pct: parseFloat(patOverlap.value) / 100,
+        headland_m: parseFloat(patHeadland.value),
+        primary_axis: patAxis.value,
+        crosscut: patCross.checked,
+      };
+      send('mission.plan', payload);          // re-plan with these params
+      patStatus.textContent = 'planning…';
+    });
+  }
+
+  // Keep pattern + sim-speed + auto-tune UI mirrored from server snapshots.
+  let patSyncedFromServer = false;
+  let speedSyncedFromServer = false;
+  function mirrorAuxFromState(s) {
+    // Pattern sliders — only sync once initially (so user input isn't yanked).
+    if (s.pattern && !patSyncedFromServer && patDeck) {
+      const p = s.pattern;
+      patDeck.value = p.deck_m;
+      document.getElementById('pat-deck-val').textContent = (+p.deck_m).toFixed(2);
+      patOverlap.value = Math.round((p.overlap_pct || 0) * 100);
+      document.getElementById('pat-overlap-val').textContent = patOverlap.value;
+      patHeadland.value = p.headland_m;
+      document.getElementById('pat-headland-val').textContent = (+p.headland_m).toFixed(2);
+      patAxis.value = p.primary_axis || 'h';
+      patCross.checked = !!p.crosscut;
+      patSyncedFromServer = true;
+    }
+    if (s.sim && !speedSyncedFromServer && simSpeed) {
+      simSpeed.value = s.sim.time_scale;
+      simSpeedVal.textContent = (+s.sim.time_scale).toFixed(2);
+      speedSyncedFromServer = true;
+    }
+    // Pattern status from waypoint count.
+    if (patStatus && s.mission) {
+      const n = s.mission.n_waypoints;
+      if (n > 0) patStatus.textContent = `${n} waypoints planned`;
+    }
+    // Auto-tune status — live.
+    const ats = document.getElementById('autotune-status');
+    if (ats && s.autotune) {
+      const a = s.autotune;
+      if (a.running) {
+        const g = a.gains || {};
+        const dp = a.dp || {};
+        const lastTxt = (a.last_cost == null) ? '—' : a.last_cost.toExponential(3);
+        const bestTxt = (a.best_cost == null) ? '—' : a.best_cost.toExponential(3);
+        const gainsLine = ['kp','ki','kd','lookahead_m']
+          .map(k => `${k}=${(g[k] ?? 0).toFixed(2)}`).join('  ');
+        const dpLine = ['kp','ki','kd','lookahead_m']
+          .map(k => `Δ${k}=${(dp[k] ?? 0).toFixed(3)}`).join('  ');
+        ats.innerHTML =
+          `iter ${a.iteration}  ${a.gain_under_test || ''} ${a.direction || ''}<br>` +
+          `cost: best ${bestTxt} · last ${lastTxt}<br>` +
+          `gains: ${gainsLine}<br>` +
+          `steps: ${dpLine}`;
+        // Mirror best gains into the live PID/lookahead sliders.
+        const apply = (id, val) => {
+          const el = document.getElementById(id);
+          if (el && val != null) el.value = +val;
+        };
+        apply('kp', g.kp); apply('ki', g.ki); apply('kd', g.kd); apply('ld', g.lookahead_m);
+      } else if (a.iteration > 0 && a.best_cost != null) {
+        const g = a.gains || {};
+        ats.textContent =
+          `done (${a.iteration} iters). Final cost ${a.best_cost.toExponential(3)} — ` +
+          `kp ${(+g.kp).toFixed(2)} ki ${(+g.ki).toFixed(2)} ` +
+          `kd ${(+g.kd).toFixed(2)} ld ${(+g.lookahead_m).toFixed(2)}m`;
+      } else {
+        ats.textContent = 'idle';
+      }
+    }
+  }
+
+  // ---- GNSS debug panel ---------------------------------------------------
+  const gnssPanel = document.getElementById('gnss-panel');
+  const gnssToggle = document.getElementById('gnss-toggle');
+  const gnssCollapseBtn = document.getElementById('gnss-collapse');
+  const skyCanvas = document.getElementById('gnss-sky');
+  const sphereCanvas = document.getElementById('gnss-sphere');
+  const barsCanvas = document.getElementById('gnss-bars');
+  const rawPre = document.getElementById('gnss-raw');
+  const legend = document.getElementById('gnss-legend');
+
+  // Color per constellation. Matches what u-center / SwiftNav typically use.
+  const CONSTELLATION_COLOR = {
+    'GPS':     '#67d3f5',
+    'GLONASS': '#e89052',
+    'Galileo': '#b5d33b',
+    'BeiDou':  '#d567b6',
+    'QZSS':    '#67e8a2',
+    'IRNSS':   '#c188ff',
+    'SBAS':    '#aaaaaa',
+    'Mixed':   '#dddddd',
+  };
+  const colorFor = (c) => CONSTELLATION_COLOR[c] || '#cccccc';
+
+  // Drag-to-move on the panel header.
+  (function makeDraggable() {
+    const handle = gnssPanel.querySelector('.dragbar');
+    let down = null;
+    handle.addEventListener('pointerdown', e => {
+      // Ignore presses on the collapse button.
+      if (e.target.tagName === 'BUTTON') return;
+      const r = gnssPanel.getBoundingClientRect();
+      down = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId };
+      handle.setPointerCapture(e.pointerId);
+    });
+    handle.addEventListener('pointermove', e => {
+      if (!down || down.id !== e.pointerId) return;
+      gnssPanel.style.left = (e.clientX - down.dx) + 'px';
+      gnssPanel.style.top  = (e.clientY - down.dy) + 'px';
+      gnssPanel.style.bottom = 'auto';
+    });
+    const release = e => { down = null; };
+    handle.addEventListener('pointerup', release);
+    handle.addEventListener('pointercancel', release);
+  })();
+
+  // Collapse / show buttons.
+  function showPanel() {
+    gnssPanel.style.display = '';
+    gnssPanel.classList.remove('collapsed');
+    gnssToggle.classList.remove('shown');
+  }
+  function hidePanel() {
+    gnssPanel.style.display = 'none';
+    gnssToggle.classList.add('shown');
+  }
+  gnssCollapseBtn.addEventListener('click', hidePanel);
+  gnssToggle.addEventListener('click', showPanel);
+
+  function renderGnss(s) {
+    const gps = s.gps || {};
+    const sats = gps.satellites || [];
+    drawSkyplot(sats);
+    drawSphere(sats);
+    drawBars(sats);
+    renderLegend(sats);
+    renderRaw(s, gps, sats);
+  }
+
+  function drawSkyplot(sats) {
+    const c = skyCanvas;
+    const cx = c.width / 2, cy = c.height / 2;
+    const R = Math.min(cx, cy) - 14;
+    const ctx2 = c.getContext('2d');
+    ctx2.clearRect(0, 0, c.width, c.height);
+
+    // Background disc
+    ctx2.fillStyle = '#0a0d12';
+    ctx2.beginPath(); ctx2.arc(cx, cy, R + 8, 0, Math.PI * 2); ctx2.fill();
+
+    // Elevation rings: 0°, 30°, 60°
+    ctx2.strokeStyle = '#1d2530';
+    ctx2.lineWidth = 1;
+    for (const el of [0, 30, 60]) {
+      const r = R * (90 - el) / 90;
+      ctx2.beginPath(); ctx2.arc(cx, cy, r, 0, Math.PI * 2); ctx2.stroke();
+    }
+    // Cardinal lines
+    ctx2.beginPath();
+    ctx2.moveTo(cx - R, cy); ctx2.lineTo(cx + R, cy);
+    ctx2.moveTo(cx, cy - R); ctx2.lineTo(cx, cy + R);
+    ctx2.stroke();
+
+    // Labels (N/E/S/W)
+    ctx2.fillStyle = '#8a96a3';
+    ctx2.font = '10px system-ui';
+    ctx2.textAlign = 'center'; ctx2.textBaseline = 'middle';
+    ctx2.fillText('N', cx, cy - R - 7);
+    ctx2.fillText('S', cx, cy + R + 7);
+    ctx2.fillText('E', cx + R + 7, cy);
+    ctx2.fillText('W', cx - R - 7, cy);
+    ctx2.fillText('90°', cx + 4, cy - 4);
+    ctx2.fillText('60°', cx + R / 3 + 6, cy - 4);
+    ctx2.fillText('30°', cx + 2 * R / 3 + 6, cy - 4);
+
+    // Satellites
+    for (const s of sats) {
+      if (s.el < 0 || s.snr <= 0) continue;
+      const az = s.az * Math.PI / 180;
+      const r = R * (90 - s.el) / 90;
+      const px = cx + r * Math.sin(az);
+      const py = cy - r * Math.cos(az);
+      const fill = colorFor(s.constellation);
+      const radius = 4 + Math.min(8, Math.max(0, (s.snr - 20)) * 0.25);
+      ctx2.fillStyle = s.used ? fill : '#33424f';
+      ctx2.strokeStyle = fill;
+      ctx2.lineWidth = s.used ? 0 : 1.2;
+      ctx2.beginPath(); ctx2.arc(px, py, radius, 0, Math.PI * 2);
+      ctx2.fill(); if (!s.used) ctx2.stroke();
+      ctx2.fillStyle = '#0c1014';
+      ctx2.font = '9px ui-monospace, Consolas, monospace';
+      ctx2.fillText(String(s.prn), px, py + 0.5);
+    }
+  }
+
+  // Tiny isometric sphere — orthographic projection tilted ~35° from zenith
+  // so the user sees a hemisphere from above with depth cueing.
+  function drawSphere(sats) {
+    const c = sphereCanvas;
+    const W = c.width, H = c.height;
+    const cx = W / 2, cy = H / 2 + 4;
+    const R = Math.min(W, H) / 2 - 8;
+    const ctx2 = c.getContext('2d');
+    ctx2.clearRect(0, 0, W, H);
+
+    const tilt = 35 * Math.PI / 180;  // viewer tilt off zenith
+    const cosT = Math.cos(tilt), sinT = Math.sin(tilt);
+
+    // Background sphere outline (great circle as seen from this angle = ellipse).
+    ctx2.fillStyle = '#0a0d12';
+    ctx2.beginPath();
+    ctx2.ellipse(cx, cy, R, R * cosT + (R - R * cosT) * 0.0, 0, 0, Math.PI * 2);
+    ctx2.fill();
+
+    // Latitude rings (elevation lines)
+    ctx2.strokeStyle = '#1d2530'; ctx2.lineWidth = 1;
+    for (const el of [30, 60]) {
+      const z = Math.sin(el * Math.PI / 180);
+      const r2 = Math.cos(el * Math.PI / 180);
+      // Project the ring of radius r2 at height z under our tilt.
+      ctx2.beginPath();
+      for (let k = 0; k <= 64; k++) {
+        const t = (k / 64) * Math.PI * 2;
+        const X = r2 * Math.sin(t);
+        const Y3 = r2 * Math.cos(t);
+        const Z = z;
+        const yp = Y3 * cosT - Z * sinT;
+        const px = cx + X * R;
+        const py = cy - yp * R;
+        if (k === 0) ctx2.moveTo(px, py); else ctx2.lineTo(px, py);
+      }
+      ctx2.stroke();
+    }
+    // Outline (horizon great circle)
+    ctx2.strokeStyle = '#2a3a4a';
+    ctx2.beginPath();
+    for (let k = 0; k <= 96; k++) {
+      const t = (k / 96) * Math.PI * 2;
+      const X = Math.sin(t);
+      const Y3 = Math.cos(t);
+      const Z = 0;
+      const yp = Y3 * cosT - Z * sinT;
+      const px = cx + X * R;
+      const py = cy - yp * R;
+      if (k === 0) ctx2.moveTo(px, py); else ctx2.lineTo(px, py);
+    }
+    ctx2.stroke();
+
+    // Zenith marker
+    ctx2.fillStyle = '#33424f';
+    const zX = 0, zY3 = 0, zZ = 1;
+    const zyp = zY3 * cosT - zZ * sinT;
+    ctx2.beginPath(); ctx2.arc(cx + zX * R, cy - zyp * R, 1.5, 0, Math.PI * 2); ctx2.fill();
+
+    // Satellites — back-to-front depth ordering so near sats overdraw far ones.
+    const projected = sats.filter(s => s.snr > 0 && s.el >= 0).map(s => {
+      const el = s.el * Math.PI / 180;
+      const az = s.az * Math.PI / 180;
+      const X = Math.cos(el) * Math.sin(az);   // east
+      const Y3 = Math.cos(el) * Math.cos(az);  // north
+      const Z = Math.sin(el);                  // up
+      const yp = Y3 * cosT - Z * sinT;
+      const depth = Y3 * sinT + Z * cosT;       // toward viewer
+      return { s, px: cx + X * R, py: cy - yp * R, depth };
+    });
+    projected.sort((a, b) => a.depth - b.depth);
+    for (const p of projected) {
+      const fill = colorFor(p.s.constellation);
+      const r = 3 + Math.min(5, Math.max(0, p.s.snr - 20) * 0.18);
+      // Fade with depth (rear sats slightly dim).
+      const alpha = 0.55 + 0.45 * ((p.depth + 1) / 2);
+      ctx2.globalAlpha = alpha;
+      ctx2.fillStyle = p.s.used ? fill : '#33424f';
+      ctx2.strokeStyle = fill; ctx2.lineWidth = p.s.used ? 0 : 1;
+      ctx2.beginPath(); ctx2.arc(p.px, p.py, r, 0, Math.PI * 2);
+      ctx2.fill(); if (!p.s.used) ctx2.stroke();
+      ctx2.globalAlpha = 1;
+    }
+  }
+
+  function drawBars(sats) {
+    const c = barsCanvas;
+    const W = c.width, H = c.height;
+    const ctx2 = c.getContext('2d');
+    ctx2.clearRect(0, 0, W, H);
+
+    const padL = 28, padR = 6, padT = 6, padB = 22;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    const sorted = [...sats].sort((a, b) => {
+      if (a.constellation === b.constellation) return a.prn - b.prn;
+      return a.constellation.localeCompare(b.constellation);
+    });
+
+    // Y-axis grid: 0..55 dB-Hz
+    const SNR_MAX = 55;
+    ctx2.strokeStyle = '#1d2530'; ctx2.lineWidth = 1;
+    ctx2.fillStyle = '#8a96a3';
+    ctx2.font = '10px ui-monospace, Consolas, monospace';
+    ctx2.textAlign = 'right'; ctx2.textBaseline = 'middle';
+    for (const v of [0, 15, 30, 45]) {
+      const y = padT + innerH * (1 - v / SNR_MAX);
+      ctx2.beginPath(); ctx2.moveTo(padL, y); ctx2.lineTo(W - padR, y); ctx2.stroke();
+      ctx2.fillText(String(v), padL - 4, y);
+    }
+
+    if (!sorted.length) {
+      ctx2.fillStyle = '#8a96a3';
+      ctx2.textAlign = 'center'; ctx2.textBaseline = 'middle';
+      ctx2.fillText('no satellites tracked', W / 2, H / 2);
+      return;
+    }
+
+    const slot = innerW / sorted.length;
+    const barW = Math.min(20, slot * 0.7);
+    ctx2.textAlign = 'center'; ctx2.textBaseline = 'top';
+    for (let i = 0; i < sorted.length; i++) {
+      const s = sorted[i];
+      const x = padL + i * slot + (slot - barW) / 2;
+      const h = innerH * Math.min(1, Math.max(0, s.snr) / SNR_MAX);
+      const y = padT + innerH - h;
+      const color = colorFor(s.constellation);
+      ctx2.fillStyle = s.used ? color : '#33424f';
+      ctx2.strokeStyle = color; ctx2.lineWidth = 1;
+      ctx2.fillRect(x, y, barW, h);
+      if (!s.used) ctx2.strokeRect(x + 0.5, y + 0.5, barW - 1, h - 1);
+      // PRN label
+      ctx2.fillStyle = '#8a96a3';
+      ctx2.fillText(String(s.prn), x + barW / 2, padT + innerH + 2);
+    }
+  }
+
+  function renderLegend(sats) {
+    const counts = {};
+    for (const s of sats) counts[s.constellation] = (counts[s.constellation] || 0) + 1;
+    const usedCounts = {};
+    for (const s of sats) if (s.used) usedCounts[s.constellation] = (usedCounts[s.constellation] || 0) + 1;
+    const parts = Object.entries(counts).sort().map(([k, v]) =>
+      `<span><span class="sw" style="background:${colorFor(k)}"></span>${k} ${usedCounts[k]||0}/${v}</span>`
+    );
+    legend.innerHTML = parts.join('');
+  }
+
+  function renderRaw(s, gps, sats) {
+    const q = ['invalid', 'single', 'DGPS', 'PPS', 'RTK-fixed', 'RTK-float'];
+    const fixLabel = q[gps.quality ?? 0] || 'unknown';
+    const used = sats.filter(x => x.used).length;
+    const tracked = sats.filter(x => x.snr > 0).length;
+    const ageS = (gps.age_s == null) ? '∞' : Number(gps.age_s).toFixed(2);
+    const latS = (gps.lat == null) ? '—' : Number(gps.lat).toFixed(7);
+    const lonS = (gps.lon == null) ? '—' : Number(gps.lon).toFixed(7);
+    const altS = (gps.alt_m == null) ? '—' : Number(gps.alt_m).toFixed(2);
+    const xy = s.gps_xy;
+    const xyS = xy ? `(${xy[0].toFixed(3)}, ${xy[1].toFixed(3)})` : '—';
+    const pose = s.pose ? `(${s.pose.x.toFixed(3)}, ${s.pose.y.toFixed(3)}, θ=${(s.pose.theta * 180 / Math.PI).toFixed(1)}°)` : '—';
+    const lines = [
+      `fix          ${fixLabel}  (q=${gps.quality ?? 0})  age=${ageS}s`,
+      `sats         ${used} used / ${tracked} tracked / ${sats.length} reported   HDOP ${gps.hdop ?? '—'}`,
+      `lat/lon/alt  ${latS}, ${lonS}, ${altS} m`,
+      `ENU (raw)    ${xyS}`,
+      `pose (est)   ${pose}`,
+    ];
+    rawPre.textContent = lines.join('\n');
+  }
+
+  // Hook into the existing render() — render GNSS + pattern/sim/autotune mirrors.
+  const origRender = render;
+  render = function patchedRender() {     // eslint-disable-line no-func-assign
+    origRender();
+    if (state) {
+      renderGnss(state);
+      mirrorAuxFromState(state);
+    }
+  };
 })();

@@ -46,6 +46,45 @@
       </div>
 
       <div class="group">
+        <h2>Sim</h2>
+        <button data-cmd="sim.reset" title="Teleport rover to a random in-bounds pose and reset mission">Reset</button>
+        <button data-cmd="sim.reset_run" class="primary" title="Reset, replan, and auto-start the mission">Reset &amp; Run</button>
+        <label>Speed ×<span id="sim-speed-val">1.0</span>
+          <input type="range" id="sim-speed" min="0.25" max="5" step="0.25" value="1.0">
+        </label>
+        <div class="hint">Random in-bounds spawn point, clears coverage, re-arms safety. Speed slider scales sim wall-clock (physics + GPS).</div>
+      </div>
+
+      <div class="group">
+        <h2>Cut pattern</h2>
+        <label>Stripe width <span id="pat-deck-val">1.20</span> m
+          <input type="range" id="pat-deck" min="0.4" max="2.5" step="0.05" value="1.20">
+        </label>
+        <label>Overlap <span id="pat-overlap-val">0</span>%
+          <input type="range" id="pat-overlap" min="0" max="50" step="5" value="0">
+        </label>
+        <label>Headland <span id="pat-headland-val">0.48</span> m
+          <input type="range" id="pat-headland" min="0" max="1.5" step="0.05" value="0.48">
+        </label>
+        <label>Axis
+          <select id="pat-axis">
+            <option value="h">East–West (h)</option>
+            <option value="v">North–South (v)</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="pat-cross" checked> Crosscut (second pass)</label>
+        <button id="pat-apply" class="primary">Apply &amp; Re-plan</button>
+        <div class="hint" id="pat-status">—</div>
+      </div>
+
+      <div class="group">
+        <h2>Auto-tune PID</h2>
+        <button data-cmd="autotune.start" title="Twiddle Kp/Ki/Kd/lookahead while mission runs">Start auto-tune</button>
+        <button data-cmd="autotune.stop" class="danger">Stop</button>
+        <div class="hint" id="autotune-status">idle</div>
+      </div>
+
+      <div class="group">
         <h2>Teach</h2>
         <button data-cmd="teach.perimeter">Map Perimeter</button>
         <button data-cmd="teach.keepout">Map Keep-out</button>
@@ -68,7 +107,11 @@
       <div class="group">
         <h2>Manual</h2>
         <div id="joy"><div id="stick"></div></div>
-        <div class="hint">deadman 300 ms — release stops</div>
+        <div class="hint">
+          <b>WASD</b> or <b>↑←↓→</b> = drive · <b>Shift</b> = slow/precision · <b>Space</b> = stop<br>
+          Joystick / keys / gamepad — release stops within 300 ms (deadman).
+          Hit the map area first if keys feel unresponsive.
+        </div>
       </div>
 
       <div class="group">
@@ -86,6 +129,38 @@
       </div>
     </aside>
   </main>
+
+  <!-- Floating, draggable GNSS debug window -->
+  <section id="gnss-panel" class="floating">
+    <header class="dragbar">
+      <span>GNSS — satellites &amp; signal</span>
+      <span class="spacer"></span>
+      <button id="gnss-collapse" title="Collapse/expand">_</button>
+    </header>
+    <div class="body">
+      <div class="row">
+        <div class="cell skyplot-cell">
+          <div class="cell-title">Skyplot (az/el)</div>
+          <canvas id="gnss-sky" width="260" height="260"></canvas>
+        </div>
+        <div class="cell sphere-cell">
+          <div class="cell-title">3D sky</div>
+          <canvas id="gnss-sphere" width="160" height="160"></canvas>
+        </div>
+      </div>
+      <div class="cell bars-cell">
+        <div class="cell-title">SNR per satellite (dB-Hz)</div>
+        <canvas id="gnss-bars" width="440" height="120"></canvas>
+        <div id="gnss-legend" class="legend"></div>
+      </div>
+      <div class="cell raw-cell">
+        <div class="cell-title">Raw debug</div>
+        <pre id="gnss-raw"></pre>
+      </div>
+    </div>
+  </section>
+
+  <button id="gnss-toggle" class="floating-toggle" title="Show GNSS panel">SAT</button>
 
   <script src="/static/app.js"></script>
 </body>

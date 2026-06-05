@@ -1,0 +1,23 @@
+# Sample lawn for the simulator. The lat/lon values map (via to_enu with
+# origin = 45.5017, -73.5673) to a 10 m east × 8 m north rectangle starting at
+# the origin, with a small triangular keep-out roughly in the middle. Copy
+# this to boundary.yaml (or rename) before starting the sim if you don't want
+# to teach one by hand via the UI.
+
+origin: {lat: 45.5017, lon: -73.5673}
+
+boundary:
+  - {lat: 45.5017,           lon: -73.5673}            # (0, 0)
+  - {lat: 45.5017,           lon: -73.567171824}       # (10, 0)
+  - {lat: 45.501772372,      lon: -73.567171824}       # (10, 8)
+  - {lat: 45.501772372,      lon: -73.5673}            # (0, 8)
+
+keepouts:
+  - type: polygon
+    label: "tree"
+    points:
+      - {lat: 45.501731663, lon: -73.567242321}        # (4.5, 3.5)
+      - {lat: 45.501731663, lon: -73.567229504}        # (5.5, 3.5)
+      - {lat: 45.501740709, lon: -73.567235912}        # (5.0, 4.5)
+
+inset_m: 0.12

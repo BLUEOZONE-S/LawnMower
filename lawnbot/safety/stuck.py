@@ -45,14 +45,25 @@ class StuckDetector:
         self._cum_odom = 0.0
         self._cum_gps = 0.0
 
-    def update(self, pose: Pose, commanding_motion: bool, odom_delta_m: float) -> StuckOutcome:
+    def update(
+        self,
+        pose: Pose,
+        commanding_motion: bool,
+        odom_delta_m: float,
+        now: float | None = None,
+    ) -> StuckOutcome:
         """Call every control tick (or every safety tick).
 
         commanding_motion: True if the controller is sending v>0 right now and
         the mission is in AUTO or RECOVER. We never count stalls in
         PAUSED/MANUAL/awaiting-fix.
+
+        ``now`` defaults to wall time. Callers running a scaled simulation
+        should pass simulated-time-elapsed so window_s / giveup_s stay
+        calibrated to the world the rover is actually living in.
         """
-        now = time.monotonic()
+        if now is None:
+            now = time.monotonic()
         if not commanding_motion:
             self._stall_started = None
             self._poses.clear()

@@ -20,8 +20,107 @@ aside { background: #0e141a; overflow: auto; padding: .6rem; }
 .group button.danger { background: #4a1b1b; border-color: #6b2d2d; }
 .group label { display: flex; align-items: center; gap: .5rem; font-size: 12px; margin: 3px 0; }
 .group input[type=range] { flex: 1; }
+.group select {
+  flex: 1;
+  background: #131a23;
+  color: #e7ecef;
+  border: 1px solid #233044;
+  border-radius: 4px;
+  padding: 3px 4px;
+  font: inherit;
+}
+#autotune-status {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: normal;
+  padding-top: 4px;
+}
 .hint { font-size: 11px; color: #8a96a3; padding-top: 4px; }
 #events { list-style: none; padding: 0; margin: 0; font-size: 12px; max-height: 130px; overflow: auto; }
 #events li { padding: 2px 0; border-bottom: 1px dotted #1d2530; color: #b9c3cd; }
 #joy { width: 140px; height: 140px; background: #131a23; border-radius: 50%; position: relative; margin: 4px auto; touch-action: none; user-select: none; border: 1px solid #233044; }
 #stick { width: 44px; height: 44px; border-radius: 50%; background: #2c4a6b; position: absolute; left: 48px; top: 48px; box-shadow: 0 2px 6px rgba(0,0,0,.5); }
+
+/* ---- GNSS debug floating window --------------------------------------- */
+.floating {
+  position: fixed;
+  bottom: 16px;
+  left: 16px;
+  width: 480px;
+  background: rgba(14, 20, 26, 0.96);
+  border: 1px solid #233044;
+  border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  z-index: 50;
+  font-variant-numeric: tabular-nums;
+}
+.floating.collapsed .body { display: none; }
+.floating .dragbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 10px;
+  background: #131a23;
+  border-bottom: 1px solid #233044;
+  border-radius: 10px 10px 0 0;
+  font-size: 12px;
+  letter-spacing: .04em;
+  color: #b9c3cd;
+  cursor: move;
+  user-select: none;
+}
+.floating .dragbar .spacer { flex: 1; }
+.floating .dragbar button {
+  background: #1a2330; color: inherit;
+  border: 1px solid #233044; border-radius: 4px;
+  width: 22px; height: 18px; line-height: 14px;
+  font-size: 12px; padding: 0;
+  cursor: pointer;
+}
+.floating .dragbar button:hover { background: #25334a; }
+.floating .body { padding: 8px 10px 10px; }
+.floating .row { display: flex; gap: 10px; }
+.floating .cell {
+  background: #0c1014;
+  border: 1px solid #1d2530;
+  border-radius: 6px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  position: relative;
+}
+.floating .row .cell { margin-bottom: 8px; flex: 0 0 auto; }
+.floating .cell-title {
+  font-size: 11px; color: #8a96a3; text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 4px;
+}
+.floating .skyplot-cell { flex: 0 0 280px; }
+.floating .sphere-cell  { flex: 1 1 auto; }
+.floating .bars-cell canvas { display: block; }
+.floating .raw-cell pre {
+  margin: 0;
+  font: 11px/1.35 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: #c8d2db;
+  max-height: 96px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+.floating .legend {
+  margin-top: 4px;
+  display: flex; flex-wrap: wrap; gap: 6px 12px;
+  font-size: 11px; color: #8a96a3;
+}
+.floating .legend .sw { display: inline-block; width: 10px; height: 10px;
+  border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+
+#gnss-toggle {
+  position: fixed;
+  bottom: 16px; left: 16px;
+  z-index: 49;
+  display: none;                 /* hidden while the panel is open */
+  background: #1a2330; color: #e7ecef;
+  border: 1px solid #233044; border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 12px; letter-spacing: .08em;
+  cursor: pointer;
+}
+#gnss-toggle.shown { display: block; }
+#gnss-toggle:hover { background: #25334a; }

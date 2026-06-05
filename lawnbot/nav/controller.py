@@ -112,6 +112,12 @@ class Controller:
         self.geom = geom
         self.pid = HeadingPID(cfg)
 
+    # Cross-track gain — gentle assist to pure-pursuit. Pure-pursuit already
+    # closes the loop on lateral error implicitly via the lookahead geometry;
+    # a small Stanley-style term just damps slow lateral drift. Too high and
+    # the rover oscillates around the path at this speed.
+    CROSS_TRACK_GAIN = 0.4
+
     def step(self, pose: Pose, path: list[Point], dt: float) -> ControlOutput:
         if not path:
             return ControlOutput(v=0.0, delta=0.0, lookahead_idx=-1, heading_err=0.0, cross_track=0.0)
@@ -124,10 +130,9 @@ class Controller:
         bearing_next = math.atan2(next_wp[1] - pose.y, next_wp[0] - pose.x)
         heading_err = wrap_pi(bearing_next - pose.theta)
         trim = self.pid.step(heading_err, dt)
-        delta = max(-self.geom.steer_max_rad, min(self.geom.steer_max_rad, delta_pp + trim))
 
-        # Cross-track approximation: perpendicular distance from pose to the
-        # line through the next waypoint heading along path tangent.
+        # Cross-track: signed perpendicular distance from pose to the path
+        # segment leading INTO the current waypoint. Positive = right of path.
         cross_track = 0.0
         if idx > 0:
             prev = path[idx - 1]
@@ -137,6 +142,15 @@ class Controller:
             tx, ty = tx / tn, ty / tn
             px, py = pose.x - prev[0], pose.y - prev[1]
             cross_track = -tx * py + ty * px  # signed
+
+        # Stanley-style cross-track steer term — scaled by speed so high-speed
+        # corrections are gentler. Subtracted because positive cross_track means
+        # "rover is right of path → steer left to return".
+        v_ref = max(0.25, self.cfg.v_nominal)
+        cross_steer = math.atan2(self.CROSS_TRACK_GAIN * cross_track, v_ref)
+
+        delta = max(-self.geom.steer_max_rad, min(self.geom.steer_max_rad,
+                                                   delta_pp + trim - cross_steer))
 
         return ControlOutput(
             v=self.cfg.v_nominal,

@@ -24,22 +24,16 @@ from pathlib import Path
 
 from . import config
 from .drive.kinematics import vd_to_command
-from .drive.motor_hat import MotorHAT
-from .drive.servo import SteeringServo
 from .estimator import Estimator
-from .gnss.lc29h import LC29H
-from .gnss.ntrip import NtripForwarder
+from .hardware import make_hardware
 from .nav.controller import Controller
 from .nav.geo import Origin, centroid_ll, to_enu
-from .nav.geometry import Polygon, point_in_polygon
+from .nav.geometry import Polygon, bbox, point_in_polygon
 from .nav.mission import Mission, State
 from .nav.planner import PlanParams, plan_coverage
 from .nav.teach import TeachRecorder, load_boundary_yaml
-from .power.pisugar import PiSugar
 from .safety.monitor import SafetyMonitor
 from .safety.stuck import StuckDetector
-from .sensors.imu import IMU, StubIMU
-from .sensors.odometry import StubOdometry
 from .telemetry.logger import JsonlLogger
 from .teleop import Teleop
 
@@ -54,29 +48,25 @@ class Runtime:
         self.cfg = cfg
         self.events: deque[str] = deque(maxlen=64)
 
-        # ---- hardware ---------------------------------------------------
-        log.info("opening motor HAT + servo")
-        self.motors = MotorHAT(cfg.drive, timeout_ms=cfg.safety.motor_timeout_ms)
-        self.servo = SteeringServo(cfg.steering, cfg.geometry)
-        self.servo.center()
-
-        log.info("opening GPS UART %s @ %d", cfg.gnss.port, cfg.gnss.baud)
-        self.gps = LC29H(cfg.gnss)
-
-        log.info("opening IMU")
-        try:
-            self.imu = IMU()
-        except Exception as e:
-            log.warning("IMU unavailable (%s) — using StubIMU", e)
-            self.imu = StubIMU()
-
-        self.odom = StubOdometry()  # swap to QuadratureEncoder once wired
-
-        self.pisugar = PiSugar()
+        # ---- hardware (real or simulated) -------------------------------
+        log.info("opening hardware backend")
+        hw = make_hardware(cfg)
+        self.motors = hw.motors
+        self.servo = hw.servo
+        self.gps = hw.gps
+        self.imu = hw.imu
+        self.odom = hw.odom
+        self.pisugar = hw.pisugar
+        self.ntrip = hw.ntrip
+        self._sim_world = hw.world  # None outside sim mode
         self.pisugar.poll()
 
         # ---- world model ------------------------------------------------
         self.origin: Origin | None = None
+        if cfg.sim.enabled:
+            # In sim, the world's lat/lon anchor is authoritative — use it as
+            # the estimator origin too so ENU coordinates stay coherent.
+            self.origin = Origin(lat=cfg.sim.origin_lat, lon=cfg.sim.origin_lon)
         self.boundary_enu: Polygon | None = None
         self.keepouts_enu: list[Polygon] = []
         self.path: list[tuple[float, float]] = []
@@ -104,13 +94,22 @@ class Runtime:
         self.safety.on_trip = self._on_safety_trip
 
         # ---- logging ----------------------------------------------------
-        self.logger = JsonlLogger(Path("/var/log/lawnbot/telemetry.jsonl"))
+        log_dir = Path(os.environ.get("LAWNBOT_LOG_DIR", cfg.logging.dir))
+        try:
+            self.logger = JsonlLogger(log_dir / "telemetry.jsonl")
+        except OSError as exc:
+            log.warning("telemetry log dir %s unavailable (%s) — using ./logs", log_dir, exc)
+            self.logger = JsonlLogger(Path("./logs/telemetry.jsonl"))
 
         # Try to load a previously taught boundary, if present.
-        try:
-            self._load_boundary("boundary.yaml")
-        except FileNotFoundError:
-            log.info("no boundary.yaml — start with teach mode")
+        for candidate in self._boundary_candidates():
+            try:
+                self._load_boundary(candidate)
+                break
+            except FileNotFoundError:
+                continue
+        else:
+            log.info("no boundary file found — start with teach mode")
 
         # Bootstrap the estimator once we have an origin.
         self._ensure_estimator()
@@ -118,15 +117,35 @@ class Runtime:
         self.safety.start()
 
         # NTRIP forwarder
-        self.ntrip = NtripForwarder(cfg.ntrip, self.gps.write_rtcm)
         try:
             self.ntrip.start()
         except Exception as e:
             log.warning("NTRIP not started: %s", e)
 
+        # Plan-time defaults exposed in the snapshot so the UI sliders mirror
+        # the current pattern (deck, overlap, headland, axis).
+        default_headland = 0.0
+        if cfg.platform == "ackermann":
+            default_headland = cfg.geometry.min_turn_radius_m + 0.05
+        self._last_plan_params = {
+            "deck_m": cfg.geometry.deck_m,
+            "body_clearance_m": cfg.geometry.body_clearance_m,
+            "headland_m": default_headland,
+            "overlap_pct": 0.0,
+            "crosscut": True,
+            "primary_axis": "h",
+        }
+
+        # PID auto-tuner — built lazily; the UI flips it on/off.
+        from .nav.autotune import AutoTuner
+        self.autotuner = AutoTuner(self.controller, self.cfg.control)
+
         self._stop = threading.Event()
         self._ctrl_thread = threading.Thread(target=self._control_loop, daemon=True)
         self._last_odom_ds = 0.0
+        # Accumulated simulated-time elapsed by the control loop, used to keep
+        # the stuck detector calibrated when the sim runs faster than wall time.
+        self._sim_time_elapsed = 0.0
 
     # ---- public API for the UI -----------------------------------------
 
@@ -135,6 +154,28 @@ class Runtime:
         gps = self.gps.latest
         mstat = self.mission.snapshot()
         sstat = self.safety.snapshot()
+
+        # Per-satellite data for the GNSS debug panel. Real LC29H and SimLC29H
+        # both expose this; older mocks without it just return an empty list.
+        sat_payload: list[dict] = []
+        sat_age = None
+        try:
+            ssnap = self.gps.satellites
+        except AttributeError:
+            ssnap = None
+        if ssnap is not None and getattr(ssnap, "sats", None):
+            sat_age = ssnap.age_s
+            for s in ssnap.sats:
+                sat_payload.append({
+                    "prn": s.prn,
+                    "talker": s.talker,
+                    "constellation": s.constellation,
+                    "el": s.elevation_deg,
+                    "az": s.azimuth_deg,
+                    "snr": s.snr_dbhz,
+                    "used": bool(s.used),
+                })
+
         out = {
             "pose": {"x": pose.x, "y": pose.y, "theta": pose.theta} if pose else None,
             "gps": {
@@ -142,6 +183,11 @@ class Runtime:
                 "sats": gps.sats if gps else 0,
                 "hdop": gps.hdop if gps else 0,
                 "age_s": gps.age_s if gps else None,
+                "lat": gps.lat if gps else None,
+                "lon": gps.lon if gps else None,
+                "alt_m": gps.alt_m if gps else None,
+                "satellites": sat_payload,
+                "sats_age_s": sat_age,
             },
             "gps_xy": self.last_gps_xy,
             "battery": {"percent": sstat.battery_pct, "charging": sstat.charging},
@@ -160,6 +206,12 @@ class Runtime:
             },
             "target": getattr(self, "_last_target", None),
             "reach": self.cfg.control.reach_m,
+            "pattern": self._last_plan_params,
+            "sim": {
+                "enabled": self.cfg.sim.enabled,
+                "time_scale": self._sim_world.time_scale if self._sim_world else 1.0,
+            },
+            "autotune": self.autotuner.snapshot(),
             "boundary": list(self.boundary_enu) if self.boundary_enu else None,
             "keepouts": [{"label": "k", "points": list(p)} for p in self.keepouts_enu],
             "path": list(self.path),
@@ -172,9 +224,9 @@ class Runtime:
     def command(self, name: str, payload: dict) -> dict:
         handlers = {
             "mission.plan": self._cmd_plan,
-            "mission.start": lambda _: (self.mission.start(), self.event("mission start"))[1] or {"ok": True},
+            "mission.start": self._cmd_mission_start,
             "mission.pause": lambda _: (self.mission.pause(), self.event("mission pause"))[1] or {"ok": True},
-            "mission.resume": lambda _: (self.mission.resume(), self.safety.rearm(), self.event("mission resume"))[2] or {"ok": True},
+            "mission.resume": self._cmd_mission_resume,
             "mission.stop": lambda _: (self.mission.stop(), self.motors.stop(), self.event("mission stop"))[2] or {"ok": True},
             "mission.replan": self._cmd_replan,
             "mode.toggle": self._cmd_mode_toggle,
@@ -185,6 +237,11 @@ class Runtime:
             "teach.save": self._cmd_teach_save,
             "control.tune": self._cmd_tune,
             "teleop": self._cmd_teleop,
+            "sim.reset": self._cmd_sim_reset,
+            "sim.reset_run": self._cmd_sim_reset_run,
+            "sim.speed": self._cmd_sim_speed,
+            "autotune.start": self._cmd_autotune_start,
+            "autotune.stop": self._cmd_autotune_stop,
         }
         h = handlers.get(name)
         if not h:
@@ -202,26 +259,101 @@ class Runtime:
 
     # ---- command handlers ---------------------------------------------
 
-    def _cmd_plan(self, _payload):
+    def _cmd_plan(self, payload):
         if not self.boundary_enu:
             return {"error": "no boundary — teach one first"}
+        # Per-platform default headland (R_min + 5cm for Ackermann; 0 for diff).
+        default_headland = 0.0
+        if self.cfg.platform == "ackermann":
+            default_headland = self.cfg.geometry.min_turn_radius_m + 0.05
+
+        p = payload if isinstance(payload, dict) else {}
+
+        def _f(key, default):
+            try:
+                return float(p[key]) if key in p else default
+            except (TypeError, ValueError):
+                return default
+
+        deck_m = max(0.1, _f("deck_m", self.cfg.geometry.deck_m))
+        body_clearance = max(0.0, _f("body_clearance_m", self.cfg.geometry.body_clearance_m))
+        headland = max(0.0, _f("headland_m", default_headland))
+        overlap = max(0.0, min(0.5, _f("overlap_pct", 0.0)))
+        crosscut = bool(p.get("crosscut", True))
+        primary_axis = p.get("primary_axis", "h")
+        if primary_axis not in ("h", "v"):
+            primary_axis = "h"
+
         params = PlanParams(
-            deck_m=self.cfg.geometry.deck_m,
-            body_clearance_m=self.cfg.geometry.body_clearance_m,
-            keepout_inflate_m=self.cfg.geometry.body_clearance_m,
-            crosscut=True,
+            deck_m=deck_m,
+            body_clearance_m=body_clearance,
+            keepout_inflate_m=body_clearance,
+            crosscut=crosscut,
+            headland_m=headland,
+            overlap_pct=overlap,
+            primary_axis=primary_axis,
         )
         self.path = plan_coverage(self.boundary_enu, self.keepouts_enu, params)
         self.mission.load_path(self.path)
-        self.event(f"plan: {len(self.path)} waypoints")
-        return {"ok": True, "n": len(self.path)}
+        # Remember params so the UI sliders can mirror them.
+        self._last_plan_params = {
+            "deck_m": deck_m,
+            "body_clearance_m": body_clearance,
+            "headland_m": headland,
+            "overlap_pct": overlap,
+            "crosscut": crosscut,
+            "primary_axis": primary_axis,
+        }
+        self.event(
+            f"plan: {len(self.path)} waypoints "
+            f"(deck={deck_m:.2f}m overlap={overlap*100:.0f}% headland={headland:.2f}m "
+            f"axis={primary_axis}{' +cross' if crosscut else ''})"
+        )
+        return {"ok": True, "n": len(self.path), "params": self._last_plan_params}
 
     def _cmd_replan(self, _payload):
         return self._cmd_plan(_payload)
 
+    def _prep_for_auto(self) -> None:
+        """Common reset path before re-entering AUTO from PAUSED/MANUAL/STUCK.
+
+        Clears the stuck detector's recovery counter (otherwise the first blip
+        after restart re-trips STUCK because tries are already exhausted),
+        re-arms safety (a previous geofence breach would otherwise keep the
+        rover disarmed), resets the PID integrator so the I-term from the
+        prior run doesn't slam the steer at start-up, and refreshes the
+        mission's cached pose so the nearest-waypoint snap uses where the
+        operator actually drove the rover, not where it got stuck.
+        """
+        self.stuck.reset()
+        self.safety.rearm()
+        self.controller.pid.reset()
+        if self.estimator is not None:
+            pose = self.estimator.snapshot()
+            self.mission.update_pose(pose)
+
+    def _cmd_mission_start(self, _payload):
+        if not self.mission.snapshot().n_waypoints:
+            return {"error": "no path — click Plan first"}
+        self._prep_for_auto()
+        self.mission.start()
+        self.event("mission start")
+        return {"ok": True}
+
+    def _cmd_mission_resume(self, _payload):
+        prev = self.mission.snapshot().state
+        self._prep_for_auto()
+        self.mission.resume()
+        new = self.mission.snapshot().state
+        if new != State.AUTO:
+            return {"error": f"resume from {prev.value} not possible"}
+        self.event(f"resume → AUTO (from {prev.value})")
+        return {"ok": True}
+
     def _cmd_mode_toggle(self, _payload):
         st = self.mission.snapshot().state
         if st == State.MANUAL:
+            self._prep_for_auto()
             self.mission.resume()
             self.event("AUTO")
         else:
@@ -244,6 +376,8 @@ class Runtime:
     def _cmd_teach_save(self, _payload):
         if not self.teach:
             return {"error": "no teach session"}
+        if not self.teach.boundary or len(self.teach.boundary) < 3:
+            return {"error": "nothing to save — record a perimeter first"}
         self.teach.save_yaml("boundary.yaml")
         self.event("boundary.yaml saved")
         return {"ok": True}
@@ -259,20 +393,148 @@ class Runtime:
         self.teleop.ingest(v, delta, override_geofence=bool(payload.get("override", False)))
         return {"ok": True}
 
+    def _random_in_cut_zone(self, pad: float = 0.6) -> tuple[float, float] | None:
+        """Sample a random ENU point that's inside the boundary, outside every
+        keep-out, and at least ``pad`` meters from the boundary's bounding box
+        edge so the rover doesn't spawn right against the geofence.
+        """
+        import random
+        if not self.boundary_enu:
+            return None
+        x0, y0, x1, y1 = bbox(self.boundary_enu)
+        if (x1 - x0) < 2 * pad or (y1 - y0) < 2 * pad:
+            pad = min(0.1, 0.4 * min(x1 - x0, y1 - y0))
+        rng = random.Random()
+        for _ in range(400):
+            px = rng.uniform(x0 + pad, x1 - pad)
+            py = rng.uniform(y0 + pad, y1 - pad)
+            if not point_in_polygon((px, py), self.boundary_enu):
+                continue
+            # Add a small clearance buffer around keep-outs.
+            blocked = False
+            for ko in self.keepouts_enu:
+                if point_in_polygon((px, py), ko):
+                    blocked = True; break
+            if blocked:
+                continue
+            return (px, py)
+        return None
+
+    def _cmd_sim_reset(self, payload):
+        """Teleport the sim rover to a random in-bounds, outside-keepout pose
+        and reset the mission/estimator/safety to a clean IDLE state.
+        """
+        if not self.cfg.sim.enabled or self._sim_world is None:
+            return {"error": "sim.reset only available in sim mode"}
+        if not self.boundary_enu:
+            return {"error": "no boundary loaded — nothing to spawn into"}
+
+        spawn = self._random_in_cut_zone()
+        if spawn is None:
+            return {"error": "could not find an in-bounds spawn point"}
+        x, y = spawn
+        theta = float(payload.get("theta_rad", 0.0)) if isinstance(payload, dict) and "theta_rad" in payload else 0.0
+        if not (isinstance(payload, dict) and "theta_rad" in payload):
+            import random
+            theta = random.Random().uniform(-math.pi, math.pi)
+
+        # 1) Stop actuators before teleporting so nothing surprising fires.
+        self.motors.stop()
+        self.servo.center()
+
+        # 2) Teleport ground truth.
+        self._sim_world.set_pose(x, y, theta)
+
+        # 3) Reset everything that holds path / pose state.
+        self.path = []
+        self.covered.clear()
+        self.mission.load_path([])
+        self.mission.stop()             # → IDLE
+        self.stuck.reset()
+        self.controller.pid.reset()
+        self.teleop.ingest(0.0, 0.0)
+        if self.estimator is not None:
+            self.estimator.seed(x, y, theta)
+        self.last_gps_xy = (x, y)
+        for attr in ("_last_target", "_last_ctl_err", "_last_ctl_cross"):
+            if hasattr(self, attr):
+                delattr(self, attr)
+
+        # 4) Re-arm safety (geofence breach state from a prior run is cleared).
+        self.safety.rearm()
+
+        self.event(f"sim reset → ({x:.2f}, {y:.2f}, θ={math.degrees(theta):.0f}°)")
+        return {"ok": True, "x": x, "y": y, "theta_rad": theta}
+
+    def _cmd_autotune_start(self, _payload):
+        st = self.mission.snapshot().state
+        if st not in (State.AUTO, State.RECOVER):
+            return {"error": "auto-tune needs the mission running (AUTO state)"}
+        if not self.autotuner.start():
+            return {"error": "auto-tune already running"}
+        self.event("auto-tune started")
+        return {"ok": True}
+
+    def _cmd_autotune_stop(self, _payload):
+        if not self.autotuner.status.running:
+            return {"error": "auto-tune is not running"}
+        self.autotuner.stop()
+        self.event("auto-tune stopped")
+        return {"ok": True}
+
+    def _cmd_sim_speed(self, payload):
+        if self._sim_world is None:
+            return {"error": "sim mode only"}
+        try:
+            scale = float(payload.get("scale", 1.0))
+        except (TypeError, ValueError):
+            return {"error": "scale must be a number"}
+        self._sim_world.set_time_scale(scale)
+        self.event(f"sim speed × {self._sim_world.time_scale:.2f}")
+        return {"ok": True, "scale": self._sim_world.time_scale}
+
+    def _cmd_sim_reset_run(self, payload):
+        """One-shot: reset, plan, start. Convenient demo button."""
+        result = self._cmd_sim_reset(payload)
+        if "error" in result:
+            return result
+        # Brief settle so the estimator's first dead-reckon sees the new pose.
+        time.sleep(0.05)
+        plan = self._cmd_plan({})
+        if "error" in plan:
+            return {"reset": result, "plan_error": plan["error"]}
+        self.mission.start()
+        self.event("mission start (after reset)")
+        return {"ok": True, "reset": result, "n_waypoints": plan.get("n", 0)}
+
     # ---- internals -----------------------------------------------------
+
+    def _boundary_candidates(self) -> list[str]:
+        """boundary.yaml wins; in sim mode also fall back to boundary.sim.yaml."""
+        candidates = ["boundary.yaml"]
+        if self.cfg.sim.enabled:
+            candidates.append("boundary.sim.yaml")
+        return candidates
 
     def _load_boundary(self, path: str | Path) -> None:
         doc = load_boundary_yaml(path)
+        b_ll = [(p["lat"], p["lon"]) for p in doc.get("boundary", [])]
+        # A 0/1/2-point "polygon" is not a valid geofence — treat the file as
+        # absent so the fallback chain (boundary.sim.yaml, then teach mode) runs.
+        if len(b_ll) < 3:
+            log.warning("boundary file %s has only %d points — skipping", path, len(b_ll))
+            raise FileNotFoundError(path)
         o = doc["origin"]
         self.origin = Origin(lat=o["lat"], lon=o["lon"])
-        b_ll = [(p["lat"], p["lon"]) for p in doc.get("boundary", [])]
         self.boundary_enu = [to_enu(lat, lon, self.origin) for lat, lon in b_ll]
         self.keepouts_enu = []
         for k in doc.get("keepouts", []):
             if k.get("type") == "polygon":
                 pts = [(p["lat"], p["lon"]) for p in k["points"]]
+                if len(pts) < 3:
+                    continue
                 self.keepouts_enu.append([to_enu(lat, lon, self.origin) for lat, lon in pts])
-        self.event(f"boundary loaded: {len(self.boundary_enu)} pts, {len(self.keepouts_enu)} keep-outs")
+        self.event(f"boundary loaded from {path}: {len(self.boundary_enu)} pts, {len(self.keepouts_enu)} keep-outs")
 
     def _ensure_estimator(self) -> None:
         if self.estimator is not None:
@@ -286,6 +548,13 @@ class Runtime:
             else:
                 self.origin = Origin(lat=fix.lat, lon=fix.lon)
         self.estimator = Estimator(self.cfg.estimator, self.origin)
+        # In sim, the world starts at a known pose (cfg.sim.start). Seed the
+        # estimator there so dead-reckoning starts from the right place — else
+        # the controller would chase a 1-second pose-snap from (0,0) and might
+        # spin the rover off course before the first GPS fix lands.
+        if self.cfg.sim.enabled:
+            s = self.cfg.sim
+            self.estimator.seed(s.start_x, s.start_y, math.radians(s.start_theta_deg))
 
     def _ensure_teach(self) -> None:
         if self.teach is None:
@@ -310,8 +579,16 @@ class Runtime:
         last = time.monotonic()
         while not self._stop.is_set():
             now = time.monotonic()
-            dt = max(1e-3, now - last)
+            dt_real = max(1e-3, now - last)
             last = now
+            # In sim, the world advances `time_scale × dt_real` of simulated
+            # time between ticks. Pass SIM dt to the controller so PID gains
+            # stay calibrated regardless of the speed slider (otherwise the
+            # D-term sees scale× larger heading-error rate and the controller
+            # oscillates at high speed).
+            scale = self._sim_world.time_scale if self._sim_world else 1.0
+            dt = dt_real * scale
+            self._sim_time_elapsed += dt
             self.safety.pet()
 
             # 1) Pull sensors.
@@ -331,6 +608,13 @@ class Runtime:
                     self.estimator.ingest_gps(fix)
                 from .nav.geo import to_enu as _enu
                 self.last_gps_xy = _enu(fix.lat, fix.lon, self.origin)
+
+            # Keep the mission's cached pose current even when not in AUTO,
+            # so a MANUAL→AUTO toggle (or STUCK→Start) can snap to the nearest
+            # not-yet-covered waypoint from where the operator actually moved
+            # the rover, not from where it was when we left AUTO.
+            if pose is not None:
+                self.mission.update_pose(pose)
 
             # 3) Dispatch by mission state.
             sstate = self.mission.snapshot().state
@@ -360,6 +644,7 @@ class Runtime:
                     out = self.controller.step(pose, self.path[self.mission.snapshot().waypoint_idx:], dt)
                     self._last_ctl_err = out.heading_err
                     self._last_ctl_cross = out.cross_track
+                    self.autotuner.sample(out.heading_err, out.cross_track)
                     cmd = vd_to_command(out.v, out.delta, self.cfg.drive, self.cfg.geometry)
                     self.motors.set_throttle(cmd.throttle_duty)
                     self.servo.set_steer(cmd.steer_rad)
@@ -367,7 +652,12 @@ class Runtime:
                     if not self.covered or math.hypot(pose.x - self.covered[-1][0], pose.y - self.covered[-1][1]) > 0.2:
                         self.covered.append((pose.x, pose.y))
                     # Stuck detection.
-                    outcome = self.stuck.update(pose, commanding_motion=cmd.throttle_duty > 0.02, odom_delta_m=ds)
+                    outcome = self.stuck.update(
+                        pose,
+                        commanding_motion=cmd.throttle_duty > 0.02,
+                        odom_delta_m=ds,
+                        now=self._sim_time_elapsed,
+                    )
                     if outcome.state == "stuck":
                         self.mission.to_stuck(outcome.reason)
                         self.motors.stop()
@@ -402,7 +692,14 @@ class Runtime:
 
     def shutdown(self) -> None:
         self._stop.set()
-        self.ntrip.stop()
+        try:
+            self.autotuner.stop()
+        except Exception:
+            log.exception("autotuner.stop failed")
+        try:
+            self.ntrip.stop()
+        except Exception:
+            log.exception("ntrip.stop failed")
         self.safety.stop()
         try:
             self.motors.close()
@@ -410,34 +707,72 @@ class Runtime:
             try:
                 self.servo.close()
             finally:
-                self.gps.close()
+                try:
+                    self.gps.close()
+                finally:
+                    if self._sim_world is not None:
+                        try:
+                            self._sim_world.stop()
+                        except Exception:
+                            log.exception("sim world stop failed")
 
 
 # ---- entrypoint ---------------------------------------------------------
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    cfg = config.load()
-    log.info("config loaded — ctrl_hz=%d ui_port=%d", cfg.control.ctrl_hz, cfg.ui.port)
+
+    parser = argparse.ArgumentParser(prog="lawnbot", description="LawnBot scheduler")
+    parser.add_argument(
+        "--config", "-c",
+        default=os.environ.get("LAWNBOT_CONFIG", "config.yaml"),
+        help="path to config.yaml (default: config.yaml or $LAWNBOT_CONFIG)",
+    )
+    parser.add_argument(
+        "--sim", action="store_true",
+        help="shortcut for --config config.sim.yaml",
+    )
+    args = parser.parse_args(argv)
+
+    cfg_path = "config.sim.yaml" if args.sim else args.config
+    cfg = config.load(cfg_path)
+    log.info("config loaded from %s — sim=%s ctrl_hz=%d ui_port=%d",
+             cfg_path, cfg.sim.enabled, cfg.control.ctrl_hz, cfg.ui.port)
 
     runtime = Runtime(cfg)
     runtime.run_forever()
 
     stop_evt = threading.Event()
-    signal.signal(signal.SIGTERM, lambda *_: stop_evt.set())
-    signal.signal(signal.SIGINT, lambda *_: stop_evt.set())
+    # SIGTERM is available on POSIX; on Windows signal.signal accepts it but
+    # only SIGINT and SIGBREAK actually fire. Register defensively.
+    for sig_name in ("SIGTERM", "SIGINT", "SIGBREAK"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            signal.signal(sig, lambda *_: stop_evt.set())
+        except (ValueError, OSError):
+            pass  # not supported on this platform
 
     # Start the FastAPI server in the main asyncio loop.
+    import asyncio
     import uvicorn
 
     from .ui.server import build_app
+
+    # Windows has no uvloop — let uvicorn pick the best available loop.
+    loop_choice = "auto" if sys.platform != "win32" else "asyncio"
+
     app = build_app(runtime, push_hz=cfg.ui.push_hz)
-    server_cfg = uvicorn.Config(app, host="0.0.0.0", port=cfg.ui.port, log_level="info",
-                                loop="uvloop", workers=1)
+    server_cfg = uvicorn.Config(
+        app, host="0.0.0.0", port=cfg.ui.port, log_level="info",
+        loop=loop_choice, workers=1,
+    )
     server = uvicorn.Server(server_cfg)
 
-    import asyncio
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     server_task = loop.create_task(server.serve())
