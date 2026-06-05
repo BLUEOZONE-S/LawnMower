@@ -28,3 +28,6 @@ htmlcov/
 # OS junk
 Thumbs.db
 *.pid
+
+# Claude Code per-project state (local-only)
+.claude/
