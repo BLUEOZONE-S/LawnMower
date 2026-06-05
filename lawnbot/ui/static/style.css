@@ -1,0 +1,27 @@
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #0c1014; color: #e7ecef; font: 14px/1.4 system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: .75rem; padding: .5rem .9rem; border-bottom: 1px solid #1d2530; background: #0e141a; }
+header h1 { margin: 0; font-size: 1rem; letter-spacing: .04em; }
+.chip { padding: 2px 10px; border-radius: 999px; background: #1d2530; font-size: 12px; }
+.chip.warn { background: #4d3618; }
+.chip.ok { background: #143922; }
+.chip.bad { background: #3b1418; }
+main { display: grid; grid-template-columns: 1fr 320px; gap: 1px; background: #1d2530; height: calc(100% - 36px); }
+#map-wrap { position: relative; background: #0c1014; overflow: hidden; }
+#map { width: 100%; height: 100%; display: block; touch-action: none; }
+#hud { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,.55); padding: 8px 10px; border-radius: 8px; display: grid; grid-template-columns: auto auto; gap: 2px 14px; font-variant-numeric: tabular-nums; font-size: 12px; }
+#hud .lbl { color: #8a96a3; margin-right: 6px; }
+aside { background: #0e141a; overflow: auto; padding: .6rem; }
+.group { padding: .5rem 0; border-bottom: 1px solid #1d2530; }
+.group h2 { margin: 0 0 .35rem 0; font-size: 12px; color: #8a96a3; text-transform: uppercase; letter-spacing: .08em; }
+.group button { display: inline-block; margin: 2px 4px 2px 0; padding: 5px 9px; background: #1a2330; color: inherit; border: 1px solid #233044; border-radius: 6px; cursor: pointer; }
+.group button:hover { background: #25334a; }
+.group button.primary { background: #1b4733; border-color: #2d6b4d; }
+.group button.danger { background: #4a1b1b; border-color: #6b2d2d; }
+.group label { display: flex; align-items: center; gap: .5rem; font-size: 12px; margin: 3px 0; }
+.group input[type=range] { flex: 1; }
+.hint { font-size: 11px; color: #8a96a3; padding-top: 4px; }
+#events { list-style: none; padding: 0; margin: 0; font-size: 12px; max-height: 130px; overflow: auto; }
+#events li { padding: 2px 0; border-bottom: 1px dotted #1d2530; color: #b9c3cd; }
+#joy { width: 140px; height: 140px; background: #131a23; border-radius: 50%; position: relative; margin: 4px auto; touch-action: none; user-select: none; border: 1px solid #233044; }
+#stick { width: 44px; height: 44px; border-radius: 50%; background: #2c4a6b; position: absolute; left: 48px; top: 48px; box-shadow: 0 2px 6px rgba(0,0,0,.5); }

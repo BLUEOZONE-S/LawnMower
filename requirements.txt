@@ -1,0 +1,16 @@
+# Hardware / IO
+pyserial==3.5
+pynmea2==1.19.0
+smbus2==0.4.3
+pigpio==1.78
+pygnssutils==1.0.30
+
+# Math / config
+numpy==1.26.4
+pyproj==3.6.1
+pyyaml==6.0.2
+
+# Web UI (FastAPI + WebSocket, uvicorn with uvloop for the Pi)
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+websockets==13.0.1

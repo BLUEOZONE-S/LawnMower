@@ -1,0 +1,89 @@
+platform: ackermann
+
+control:
+  ctrl_hz: 20
+  v_nominal: 0.45
+  reach_m: 0.22
+  max_steer_deg: 30
+  pure_pursuit:
+    enabled: true
+    lookahead_m: 0.6
+  pid:
+    kp: 3.0
+    ki: 0.30
+    kd: 0.35
+    imax: 1.0
+
+geometry:
+  wheelbase_m: 0.25       # front-rear axle distance — MEASURE on your RC car
+  steer_max_deg: 30       # full lock at the wheels — MEASURE
+  deck_m: 0.50            # simulated coverage swath (no blade)
+  body_clearance_m: 0.12
+
+drive:
+  pca9685_addr: 0x40
+  pwm_hz: 1000
+  # Waveshare 15364 mapping (verify against Waveshare's PCA9685.py example)
+  motor_rear:  {pwm_ch: 0, in1_ch: 1, in2_ch: 2}
+  motor_front: {pwm_ch: 5, in1_ch: 3, in2_ch: 4}
+  drive_both: true        # AWD — both motors share one throttle command
+  v_max: 1.2              # m/s at 100% duty — calibrate via tools/motor_calibrate.py
+  deadband: 0.08
+  invert_rear: false
+  invert_front: false
+
+steering:
+  gpio_pin: 18            # pigpio hardware-timed PWM
+  pwm_hz: 50
+  us_center: 1500         # CALIBRATE — wheels straight
+  us_min: 1000            # full lock one way
+  us_max: 2000            # full lock other way
+  invert: false
+
+gnss:
+  port: /dev/serial0
+  baud: 115200            # try 460800 if no NMEA arrives
+  min_fix_quality: 4      # 4=RTK-fixed, 5=RTK-float
+  fix_max_age_s: 3.0
+
+ntrip:
+  host: ""
+  port: 2101
+  mountpoint: ""
+  user: ""
+  password: ""
+
+estimator:
+  gps_blend_alpha: 0.5
+  imu_yaw_offset_deg: 0.0
+
+safety:
+  geo_margin_m: 0.5
+  return_pct: 25
+  stop_pct: 12
+  degrade_sec: 5
+  motor_timeout_ms: 300
+
+ui:
+  port: 8080
+  push_hz: 10
+
+teleop:
+  deadman_ms: 300
+  manual_v_max: 0.35
+  manual_steer_deg: 30
+  enforce_geofence: true
+
+stuck:
+  window_s: 20
+  min_progress_m: 0.3
+  recovery_tries: 2
+  giveup_s: 60
+
+teach:
+  sample_m: 0.25
+  simplify_m: 0.15
+  loop_min_perimeter_m: 2.0
+  loop_closure_m: 0.5
+  auto_confirm_closure: false
+  boundary_inset_m: 0.12

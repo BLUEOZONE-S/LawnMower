@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>LawnBot</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <h1>LawnBot</h1>
+    <div id="state-chip" class="chip">IDLE</div>
+    <div id="conn" class="chip warn">disconnected</div>
+  </header>
+
+  <main>
+    <section id="map-wrap">
+      <canvas id="map" width="900" height="600"></canvas>
+      <div id="hud">
+        <div><span class="lbl">Fix</span> <span id="hud-fix">-</span></div>
+        <div><span class="lbl">Age</span> <span id="hud-age">-</span> s</div>
+        <div><span class="lbl">Sats</span> <span id="hud-sats">-</span></div>
+        <div><span class="lbl">Battery</span> <span id="hud-batt">-</span> %</div>
+        <div><span class="lbl">Heading</span> <span id="hud-heading">-</span>°</div>
+        <div><span class="lbl">Err</span> <span id="hud-err">-</span>°</div>
+        <div><span class="lbl">Cross</span> <span id="hud-cross">-</span> m</div>
+        <div><span class="lbl">WP</span> <span id="hud-wp">-</span></div>
+        <div><span class="lbl">Cov</span> <span id="hud-cov">-</span>%</div>
+      </div>
+    </section>
+
+    <aside id="panel">
+      <div class="group">
+        <h2>Mission</h2>
+        <button data-cmd="mission.plan">Plan</button>
+        <button data-cmd="mission.start" class="primary">Start</button>
+        <button data-cmd="mission.pause">Pause</button>
+        <button data-cmd="mission.resume">Resume</button>
+        <button data-cmd="mission.stop" class="danger">Stop</button>
+        <button data-cmd="mission.replan">Re-plan from here</button>
+      </div>
+
+      <div class="group">
+        <h2>Mode</h2>
+        <button data-cmd="mode.toggle">AUTO / MANUAL</button>
+      </div>
+
+      <div class="group">
+        <h2>Teach</h2>
+        <button data-cmd="teach.perimeter">Map Perimeter</button>
+        <button data-cmd="teach.keepout">Map Keep-out</button>
+        <button data-cmd="teach.finish">Finish</button>
+        <button data-cmd="teach.undo">Undo</button>
+        <button data-cmd="teach.save">Save boundary.yaml</button>
+        <div class="hint" id="teach-hint"></div>
+      </div>
+
+      <div class="group">
+        <h2>PID + Speed</h2>
+        <label>Kp <input type="range" id="kp" min="0" max="10" step="0.05" value="3.0"></label>
+        <label>Ki <input type="range" id="ki" min="0" max="2" step="0.01" value="0.30"></label>
+        <label>Kd <input type="range" id="kd" min="0" max="2" step="0.01" value="0.35"></label>
+        <label>v_nominal <input type="range" id="vnom" min="0.1" max="1.5" step="0.01" value="0.45"></label>
+        <label>lookahead <input type="range" id="ld" min="0.2" max="3.0" step="0.05" value="0.6"></label>
+        <div id="pid-breakdown" class="hint"></div>
+      </div>
+
+      <div class="group">
+        <h2>Manual</h2>
+        <div id="joy"><div id="stick"></div></div>
+        <div class="hint">deadman 300 ms — release stops</div>
+      </div>
+
+      <div class="group">
+        <h2>Layers</h2>
+        <label><input type="checkbox" id="layer-path" checked> path</label>
+        <label><input type="checkbox" id="layer-coverage" checked> coverage</label>
+        <label><input type="checkbox" id="layer-gps" checked> raw GPS</label>
+        <label><input type="checkbox" id="layer-fused" checked> fused</label>
+        <label><input type="checkbox" id="layer-teach" checked> teach track</label>
+      </div>
+
+      <div class="group">
+        <h2>Events</h2>
+        <ul id="events"></ul>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

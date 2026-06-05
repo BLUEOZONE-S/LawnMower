@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.log
+logs/
+*.swp
+.DS_Store
+.idea/
+.vscode/
+boundary.local.yaml
+telemetry/*.csv
+telemetry/*.jsonl
+
+# Build / packaging
+build/
+dist/
+
+# Test / type-checker caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS junk
+Thumbs.db
+*.pid

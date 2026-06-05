@@ -1,0 +1,24 @@
+[Unit]
+Description=LawnBot autonomous coverage rover
+After=network-online.target pisugar-server.service pigpiod.service
+Wants=network-online.target pigpiod.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/lawnbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/pi/lawnbot/.venv/bin/python -m lawnbot.main
+Restart=on-failure
+RestartSec=2
+# Real-time scheduling for the control loop is acquired in-process (SCHED_FIFO),
+# so the service needs the capability:
+AmbientCapabilities=CAP_SYS_NICE
+CapabilityBoundingSet=CAP_SYS_NICE
+
+# Keep logs out of journald spam volume but still searchable:
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
