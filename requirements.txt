@@ -2,7 +2,7 @@
 pyserial==3.5
 pynmea2==1.19.0
 smbus2==0.4.3
-pigpio==1.78
+lgpio==0.2.2.0
 pygnssutils==1.0.30
 
 # Math / config
