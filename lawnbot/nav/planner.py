@@ -23,6 +23,10 @@ from .geometry import (
     dist,
     line_clips_polygon_y,
     los_clear,
+    point_in_polygon,
+    polygon_centroid,
+    rotate_point,
+    rotate_polygon,
     subtract_intervals,
 )
 
@@ -45,8 +49,24 @@ class PlanParams:
     # overlap (effective spacing = 0.9·deck_m). Clamped to [0, 0.5].
     overlap_pct: float = 0.0
     # Direction of the primary stripe pass: "h" = east-west, "v" = north-south.
-    # The crosscut (if enabled) runs perpendicular to this.
+    # The crosscut (if enabled) runs perpendicular to this. Boustrophedon only.
     primary_axis: str = "h"
+    # Coverage pattern preset. See PATTERN_NAMES for the full list.
+    pattern: str = "boustrophedon"
+
+
+# Patterns expressed as a list of stripe-pass angles (radians off +x axis).
+# A "pass" is one boustrophedon-style scan in the rotated frame; multiple
+# passes overlay to produce richer coverage at the cost of more waypoints.
+PATTERN_ANGLES: dict[str, list[float]] = {
+    "boustrophedon": [0.0],
+    "crosshatch":    [0.0, math.pi / 2],
+    "diamond":       [math.pi / 4, 3 * math.pi / 4],
+    "triangle":      [0.0, math.pi / 3, 2 * math.pi / 3],
+    "star":          [k * math.pi / 6 for k in range(6)],  # 0°, 30°, …, 150°
+}
+
+PATTERN_NAMES = list(PATTERN_ANGLES.keys()) + ["spiral", "wave"]
 
 
 def _stripes(
@@ -199,49 +219,236 @@ def _connect(a: Point, b: Point, drivable: DrivableMask) -> list[Point]:
     return _string_pull(path, drivable)
 
 
+def _stripes_at_angle(
+    boundary: Polygon,
+    keepouts: list[Polygon],
+    spacing: float,
+    inflate: float,
+    angle_rad: float,
+    end_inset: float,
+    origin: Point,
+) -> list[list[Point]]:
+    """Generate boustrophedon stripes oriented along ``angle_rad`` off +x.
+
+    Implementation: rotate everything into a frame where stripes are
+    horizontal, run the regular scan-line carver, then rotate the resulting
+    waypoints back to ENU.
+    """
+    if abs(angle_rad) < 1e-9:
+        return _stripes(boundary, keepouts, spacing, inflate, "h", end_inset_m=end_inset)
+    if abs(angle_rad - math.pi / 2) < 1e-9:
+        return _stripes(boundary, keepouts, spacing, inflate, "v", end_inset_m=end_inset)
+    boundary_r = rotate_polygon(boundary, -angle_rad, origin)
+    keepouts_r = [rotate_polygon(k, -angle_rad, origin) for k in keepouts]
+    raw = _stripes(boundary_r, keepouts_r, spacing, inflate, "h", end_inset_m=end_inset)
+    # Rotate every segment endpoint back into ENU.
+    return [
+        [rotate_point(p, angle_rad, origin) for p in seg]
+        for seg in raw
+    ]
+
+
+def _spiral(
+    boundary: Polygon,
+    keepouts: list[Polygon],
+    deck_m: float,
+    drivable: DrivableMask,
+) -> list[Point]:
+    """Archimedean spiral seeded at the boundary centroid.
+
+    r(θ) = (deck / 2π) · θ — one revolution every ``deck`` meters of radius.
+    The point step is adapted so arc length stays ≈ deck/3 (gives the
+    pure-pursuit controller a smooth, dense path to follow).
+    """
+    if deck_m <= 0:
+        return []
+    cx, cy = polygon_centroid(boundary)
+    x0, y0, x1, y1 = bbox(boundary)
+    max_r = math.hypot(x1 - x0, y1 - y0)  # cap so we don't run away
+    b = deck_m / (2 * math.pi)
+    waypoints: list[Point] = []
+    theta = 0.0
+    while True:
+        r = b * theta
+        if r > max_r:
+            break
+        x = cx + r * math.cos(theta)
+        y = cy + r * math.sin(theta)
+        if drivable.at(x, y):
+            waypoints.append((x, y))
+        # Adaptive step: keep arc-length step ≈ deck/3.
+        d_theta = (deck_m / 3.0) / max(0.05, r)
+        theta += d_theta
+        if theta > 200 * math.pi:  # safety stop after 100 revolutions
+            break
+    return waypoints
+
+
+def _wave_stripes(
+    boundary: Polygon,
+    keepouts: list[Polygon],
+    spacing: float,
+    inflate: float,
+    end_inset: float,
+    axis: str,
+    amplitude_m: float,
+    wavelength_m: float,
+    drivable: DrivableMask,
+) -> list[list[Point]]:
+    """Boustrophedon stripes warped by a sinusoid perpendicular to travel.
+
+    Each straight segment from ``_stripes`` is replaced with a wavy polyline.
+    Wave amplitude is bounded so adjacent stripes don't cross.
+    """
+    raw = _stripes(boundary, keepouts, spacing, inflate, axis, end_inset_m=end_inset)
+    amp = max(0.0, min(amplitude_m, 0.45 * spacing))
+    if amp <= 1e-3 or wavelength_m <= 1e-3:
+        return raw
+    out: list[list[Point]] = []
+    for seg in raw:
+        a, b = seg[0], seg[1]
+        if axis == "h":
+            x0, x1 = a[0], b[0]
+            y = a[1]
+            length = abs(x1 - x0)
+            steps = max(2, int(length / (wavelength_m * 0.1)))
+            sgn = 1 if x1 >= x0 else -1
+            pts = []
+            for k in range(steps + 1):
+                t = k / steps
+                x = x0 + sgn * length * t
+                phase = 2 * math.pi * (sgn * length * t) / wavelength_m
+                yy = y + amp * math.sin(phase)
+                if drivable.at(x, yy):
+                    pts.append((x, yy))
+            if len(pts) >= 2:
+                out.append(pts)
+        else:  # axis == "v"
+            x = a[0]
+            y0, y1 = a[1], b[1]
+            length = abs(y1 - y0)
+            steps = max(2, int(length / (wavelength_m * 0.1)))
+            sgn = 1 if y1 >= y0 else -1
+            pts = []
+            for k in range(steps + 1):
+                t = k / steps
+                y = y0 + sgn * length * t
+                phase = 2 * math.pi * (sgn * length * t) / wavelength_m
+                xx = x + amp * math.sin(phase)
+                if drivable.at(xx, y):
+                    pts.append((xx, y))
+            if len(pts) >= 2:
+                out.append(pts)
+    return out
+
+
+def _stitch_segments(
+    segments: list[list[Point]],
+    drivable: DrivableMask,
+) -> list[Point]:
+    """Connect a serpentine list of segments into one waypoint stream.
+
+    Each segment is itself a polyline (≥2 points). Between segments, drop a
+    straight LOS or A* connector through drivable terrain.
+    """
+    waypoints: list[Point] = []
+    last: Point | None = None
+    for seg in segments:
+        if not seg:
+            continue
+        if last is not None and last != seg[0]:
+            connector = _connect(last, seg[0], drivable)
+            waypoints.extend(connector[1:])
+        else:
+            waypoints.append(seg[0])
+        for p in seg[1:]:
+            waypoints.append(p)
+        last = seg[-1]
+    return waypoints
+
+
+def _dedupe(waypoints: list[Point], min_step_m: float = 0.05) -> list[Point]:
+    deduped: list[Point] = []
+    for p in waypoints:
+        if not deduped or dist(deduped[-1], p) > min_step_m:
+            deduped.append(p)
+    return deduped
+
+
 def plan_coverage(
     boundary: Polygon,
     keepouts: list[Polygon],
     params: PlanParams,
 ) -> list[Point]:
-    """Build the full waypoint list for the mission."""
+    """Build the full waypoint list for the mission.
+
+    Dispatches on ``params.pattern``:
+      - boustrophedon / crosshatch / diamond / triangle / star → multi-angle
+        stripe passes (each rotated to a different orientation).
+      - spiral → Archimedean spiral from the boundary centroid outward.
+      - wave   → sinusoidal stripes (one pass along ``primary_axis``).
+    """
     inflate = params.body_clearance_m
     drivable = DrivableMask(boundary, keepouts, cell_m=params.grid_cell_m, inflate_m=inflate)
     end_inset = inflate + max(0.0, params.headland_m)
-
-    # Effective stripe spacing with overlap. Clamp overlap to a sane range so
-    # the planner never produces zero-spacing infinite-loop output.
     overlap = max(0.0, min(0.5, float(params.overlap_pct)))
     spacing = max(0.05, params.deck_m * (1.0 - overlap))
+    pattern = (params.pattern or "boustrophedon").lower()
 
-    primary = params.primary_axis if params.primary_axis in ("h", "v") else "h"
-    secondary = "v" if primary == "h" else "h"
+    if pattern == "spiral":
+        pts = _spiral(boundary, keepouts, spacing, drivable)
+        return _dedupe(pts)
 
-    waypoints: list[Point] = []
-
-    def append_pass(axis: str) -> None:
-        segments = _stripes(
-            boundary, keepouts, spacing, inflate, axis,
-            end_inset_m=end_inset,
+    if pattern == "wave":
+        axis = params.primary_axis if params.primary_axis in ("h", "v") else "h"
+        segments = _wave_stripes(
+            boundary, keepouts, spacing, inflate, end_inset, axis,
+            amplitude_m=spacing * 0.25,
+            wavelength_m=max(spacing * 2.5, 1.0),
+            drivable=drivable,
         )
+        return _dedupe(_stitch_segments(segments, drivable))
+
+    if pattern in PATTERN_ANGLES:
+        origin = polygon_centroid(boundary)
+        angles = list(PATTERN_ANGLES[pattern])
+        # Honor primary_axis on the basic boustrophedon-style patterns by
+        # rotating the whole pattern 90° if the user picked NS instead of EW.
+        if pattern in ("boustrophedon",) and params.primary_axis == "v":
+            angles = [a + math.pi / 2 for a in angles]
+        # Boustrophedon's "crosscut" toggle adds a perpendicular pass — useful
+        # for the legacy single-axis pattern. The other presets already encode
+        # their own multi-pass structure so ignore the flag there.
+        if pattern == "boustrophedon" and params.crosscut:
+            angles.append(angles[0] + math.pi / 2)
+
+        waypoints: list[Point] = []
         last: Point | None = None
-        for seg in segments:
-            if last is not None and last != seg[0]:
-                connector = _connect(last, seg[0], drivable)
-                # Skip the first point (== last) to avoid dup
-                waypoints.extend(connector[1:])
-            else:
-                waypoints.append(seg[0])
-            waypoints.append(seg[1])
-            last = seg[1]
+        for angle in angles:
+            segs = _stripes_at_angle(boundary, keepouts, spacing, inflate, angle, end_inset, origin)
+            for seg in segs:
+                if last is not None and last != seg[0]:
+                    connector = _connect(last, seg[0], drivable)
+                    waypoints.extend(connector[1:])
+                else:
+                    waypoints.append(seg[0])
+                for p in seg[1:]:
+                    waypoints.append(p)
+                last = seg[-1]
+        return _dedupe(waypoints)
 
-    append_pass(primary)
-    if params.crosscut:
-        append_pass(secondary)
-
-    # Drop consecutive duplicates introduced by joins.
-    deduped: list[Point] = []
-    for p in waypoints:
-        if not deduped or dist(deduped[-1], p) > 0.05:
-            deduped.append(p)
-    return deduped
+    # Unknown pattern → safe fallback.
+    return _dedupe(plan_coverage(
+        boundary, keepouts,
+        PlanParams(
+            deck_m=params.deck_m,
+            body_clearance_m=params.body_clearance_m,
+            keepout_inflate_m=params.keepout_inflate_m,
+            crosscut=params.crosscut,
+            grid_cell_m=params.grid_cell_m,
+            headland_m=params.headland_m,
+            overlap_pct=params.overlap_pct,
+            primary_axis=params.primary_axis,
+            pattern="boustrophedon",
+        ),
+    ))

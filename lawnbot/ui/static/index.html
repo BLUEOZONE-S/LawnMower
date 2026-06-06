@@ -46,6 +46,34 @@
       </div>
 
       <div class="group">
+        <h2>Backend</h2>
+        <label>Mode
+          <select id="backend-mode">
+            <option value="sim">Sim — this browser</option>
+            <option value="real">Real — Pi on network</option>
+          </select>
+        </label>
+        <div id="backend-real-row" style="display:none;">
+          <label>Pi host (blank → auto-detect)
+            <input id="backend-host" type="text" placeholder="lawnbot.local:8080" size="22">
+          </label>
+          <div class="hint">Auto-detect probes
+            <code>lawnbot.local</code>,
+            <code>raspberrypi.local</code>,
+            <code>192.168.4.1</code>,
+            <code>10.42.0.1</code>
+            on port 8080.</div>
+        </div>
+        <button id="backend-connect" class="primary">Connect</button>
+        <div class="hint" id="backend-status">connected · local</div>
+        <details class="advanced">
+          <summary>Advanced</summary>
+          <button id="backend-swap" title="Swap the connected server's own hardware between sim and real (only works on a Pi that has both available)">Swap server's hardware…</button>
+          <div class="hint">Hot-swaps the <i>connected server's</i> hardware. Only works when the connected machine can open real I/O (i.e. on the Pi). On Windows the real backend can't open hardware, so it rolls back cleanly.</div>
+        </details>
+      </div>
+
+      <div class="group">
         <h2>Sim</h2>
         <button data-cmd="sim.reset" title="Teleport rover to a random in-bounds pose and reset mission">Reset</button>
         <button data-cmd="sim.reset_run" class="primary" title="Reset, replan, and auto-start the mission">Reset &amp; Run</button>
@@ -57,6 +85,17 @@
 
       <div class="group">
         <h2>Cut pattern</h2>
+        <label>Preset
+          <select id="pat-preset">
+            <option value="boustrophedon">Lines (boustrophedon)</option>
+            <option value="crosshatch">Crosshatch (H + V)</option>
+            <option value="diamond">Diamond (45° crosshatch)</option>
+            <option value="triangle">Triangle (3 angles · 60°)</option>
+            <option value="star">Star (6 angles · 30°)</option>
+            <option value="spiral">Spiral (Archimedean)</option>
+            <option value="wave">Wave (sinusoidal)</option>
+          </select>
+        </label>
         <label>Stripe width <span id="pat-deck-val">1.20</span> m
           <input type="range" id="pat-deck" min="0.4" max="2.5" step="0.05" value="1.20">
         </label>
@@ -66,15 +105,15 @@
         <label>Headland <span id="pat-headland-val">0.48</span> m
           <input type="range" id="pat-headland" min="0" max="1.5" step="0.05" value="0.48">
         </label>
-        <label>Axis
+        <label>Primary axis
           <select id="pat-axis">
             <option value="h">East–West (h)</option>
             <option value="v">North–South (v)</option>
           </select>
         </label>
-        <label><input type="checkbox" id="pat-cross" checked> Crosscut (second pass)</label>
+        <label><input type="checkbox" id="pat-cross" checked> Crosscut (boustrophedon only)</label>
         <button id="pat-apply" class="primary">Apply &amp; Re-plan</button>
-        <div class="hint" id="pat-status">—</div>
+        <div class="hint" id="pat-status">Spiral &amp; star = many waypoints, density &amp; flair. Diamond = 45° lines. Triangle = 3 passes 60° apart.</div>
       </div>
 
       <div class="group">

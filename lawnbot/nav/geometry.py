@@ -18,6 +18,29 @@ def bbox(poly: Polygon) -> tuple[float, float, float, float]:
     return min(xs), min(ys), max(xs), max(ys)
 
 
+def polygon_centroid(poly: Polygon) -> Point:
+    """Average vertex position — exact for triangles, close enough for any
+    reasonably symmetric yard polygon. Used as the rotation origin so all
+    rotated pattern generators stay anchored in the lawn rather than drifting.
+    """
+    if not poly:
+        return (0.0, 0.0)
+    n = len(poly)
+    return (sum(p[0] for p in poly) / n, sum(p[1] for p in poly) / n)
+
+
+def rotate_point(p: Point, angle_rad: float, origin: Point = (0.0, 0.0)) -> Point:
+    """Rotate ``p`` by ``angle_rad`` CCW around ``origin``."""
+    c, s = math.cos(angle_rad), math.sin(angle_rad)
+    ox, oy = origin
+    dx, dy = p[0] - ox, p[1] - oy
+    return (ox + dx * c - dy * s, oy + dx * s + dy * c)
+
+
+def rotate_polygon(poly: Polygon, angle_rad: float, origin: Point = (0.0, 0.0)) -> Polygon:
+    return [rotate_point(p, angle_rad, origin) for p in poly]
+
+
 def signed_area(poly: Polygon) -> float:
     a = 0.0
     n = len(poly)

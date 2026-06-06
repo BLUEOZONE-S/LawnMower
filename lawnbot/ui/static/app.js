@@ -17,13 +17,61 @@
   let teleopActive = false;
   let teleopHB = 0;
 
+  // ---- Backend connection (Sim local ↔ Real Pi on network) -----------
+  //
+  // backendBase = '' → relative to whichever server delivered this page
+  //                    (typically the local sim on Windows).
+  // backendBase = 'host[:port]' → connect to a specific lawnbot server on
+  //                    the network — usually the Pi at one of the candidate
+  //                    addresses below.
+  const PI_CANDIDATES = [
+    'lawnbot.local:8080',
+    'raspberrypi.local:8080',
+    '192.168.4.1:8080',
+    '10.42.0.1:8080',
+  ];
+
+  let backendBase = '';
+  let backendMode = 'sim';
+  let backendBusy = false;            // true while probing / connecting; suppresses snapshot mirror
+  let reconnectTimer = null;
+
+  try {
+    const saved = JSON.parse(localStorage.getItem('lawnbot_backend') || '{}');
+    if (saved.mode === 'real' && saved.host) {
+      backendBase = saved.host;
+      backendMode = 'real';
+    } else if (saved.mode === 'sim') {
+      backendMode = 'sim';
+    }
+  } catch (e) {}
+
+  function wsBaseUrl() {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const host = backendBase || location.host;
+    return `${proto}://${host}/ws`;
+  }
+  function backendLabel() {
+    return backendBase ? backendBase : (location.host || 'local');
+  }
+
   // ---- WebSocket -----------------------------------------------------
   let ws;
   function connect() {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    ws = new WebSocket(`${proto}://${location.host}/ws`);
-    ws.onopen = () => { conn.textContent = 'connected'; conn.className = 'chip ok'; };
-    ws.onclose = () => { conn.textContent = 'disconnected'; conn.className = 'chip warn'; setTimeout(connect, 1000); };
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    try { if (ws) ws.close(); } catch (e) {}
+    ws = new WebSocket(wsBaseUrl());
+    ws.onopen = () => {
+      conn.textContent = `connected · ${backendLabel()}`; conn.className = 'chip ok';
+    };
+    ws.onclose = () => {
+      conn.textContent = `disconnected · ${backendLabel()}`; conn.className = 'chip warn';
+      reconnectTimer = setTimeout(connect, 1000);
+    };
+    ws.onerror = () => {
+      // Trigger a label change so the user sees the bad host immediately.
+      conn.textContent = `error · ${backendLabel()}`; conn.className = 'chip bad';
+    };
     ws.onmessage = (m) => { state = JSON.parse(m.data); render(); };
   }
   connect();
@@ -32,6 +80,166 @@
     if (ws && ws.readyState === 1) {
       ws.send(JSON.stringify({ cmd, payload: payload || {} }));
     }
+  }
+
+  // ---- Backend switcher UI -------------------------------------------
+  const backendMode_el = document.getElementById('backend-mode');
+  const backendHost_el = document.getElementById('backend-host');
+  const backendRealRow = document.getElementById('backend-real-row');
+  const backendConnect = document.getElementById('backend-connect');
+  const backendStatus  = document.getElementById('backend-status');
+  const backendSwap    = document.getElementById('backend-swap');
+
+  function refreshBackendUi() {
+    if (!backendMode_el) return;
+    backendMode_el.value = backendMode;
+    if (backendHost_el && backendMode === 'real') backendHost_el.value = backendBase;
+    if (backendRealRow) backendRealRow.style.display = (backendMode === 'real') ? '' : 'none';
+  }
+  refreshBackendUi();
+
+  if (backendMode_el) {
+    backendMode_el.addEventListener('change', () => {
+      backendMode = backendMode_el.value;
+      refreshBackendUi();
+    });
+  }
+
+  function normalizeHost(h) {
+    h = (h || '').trim();
+    if (h.startsWith('http://'))  h = h.slice('http://'.length);
+    if (h.startsWith('https://')) h = h.slice('https://'.length);
+    h = h.replace(/^\/+|\/+$/g, '');
+    if (h && !h.includes(':')) h += ':8080';
+    return h;
+  }
+
+  // Probe a host by opening a WebSocket and waiting for the lawnbot snapshot
+  // shape. Resolves with the host on success, rejects on timeout / wrong
+  // protocol / connection error.
+  function probeHost(host, timeoutMs = 2000) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let probe;
+      const finish = (fn, val) => { if (settled) return; settled = true;
+                                    try { probe && probe.close(); } catch (e) {}
+                                    fn(val); };
+      const timer = setTimeout(() => finish(reject, new Error('timeout')), timeoutMs);
+      try {
+        probe = new WebSocket(`ws://${host}/ws`);
+      } catch (e) {
+        clearTimeout(timer);
+        return reject(e);
+      }
+      probe.onerror = () => { clearTimeout(timer); finish(reject, new Error('error')); };
+      probe.onopen  = () => {
+        // Got a successful handshake — wait for the first JSON frame and
+        // confirm it carries the lawnbot snapshot shape.
+        probe.onmessage = (m) => {
+          try {
+            const s = JSON.parse(m.data);
+            if (s && (s.mission !== undefined || s.pose !== undefined || s.gps !== undefined)) {
+              clearTimeout(timer);
+              finish(resolve, host);
+            } else {
+              clearTimeout(timer);
+              finish(reject, new Error('not lawnbot'));
+            }
+          } catch (e) {
+            clearTimeout(timer);
+            finish(reject, e);
+          }
+        };
+      };
+    });
+  }
+
+  // Race a list of probes in parallel; resolve with the first one that hits.
+  async function discoverPi(extraHost) {
+    const list = [];
+    if (extraHost) list.push(normalizeHost(extraHost));
+    for (const c of PI_CANDIDATES) list.push(c);
+    // Dedupe + drop empties.
+    const seen = new Set();
+    const probes = list.filter(h => h && !seen.has(h) && (seen.add(h), true));
+    backendStatus.innerHTML = 'searching network…<br>' +
+        probes.map(h => `• ${h}`).join('<br>');
+    try {
+      return await Promise.any(probes.map(h => probeHost(h, 2500)));
+    } catch (e) {
+      return null;   // AggregateError → none responded
+    }
+  }
+
+  if (backendConnect) {
+    backendConnect.addEventListener('click', async () => {
+      if (backendMode === 'sim') {
+        backendBase = '';
+        localStorage.setItem('lawnbot_backend', JSON.stringify({ mode: 'sim' }));
+        backendBusy = true;
+        backendStatus.textContent = `connecting → local …`;
+        connect();
+        // Let the snapshot mirror take over after ~1s of stable connection.
+        setTimeout(() => { backendBusy = false; }, 1500);
+        return;
+      }
+      // Real mode: use the manual host if provided, else auto-discover.
+      const manual = normalizeHost(backendHost_el.value);
+      backendConnect.disabled = true;
+      backendBusy = true;
+      let connectedNew = false;
+      try {
+        let host = manual;
+        if (!host) {
+          host = await discoverPi();
+          if (!host) {
+            backendStatus.textContent =
+              '✗ no Pi found on lawnbot.local / raspberrypi.local / 192.168.4.1 / 10.42.0.1. ' +
+              'Enter the Pi’s host:port manually.';
+            return;
+          }
+        } else {
+          backendStatus.textContent = `probing ${host} …`;
+          try { await probeHost(host, 3000); }
+          catch (e) {
+            backendStatus.textContent = `✗ ${host} did not respond (${e.message || e}).`;
+            return;
+          }
+        }
+        backendBase = host;
+        if (backendHost_el) backendHost_el.value = host;
+        localStorage.setItem('lawnbot_backend', JSON.stringify({ mode: 'real', host }));
+        backendStatus.textContent = `connecting → ${host} …`;
+        connect();
+        connectedNew = true;
+      } finally {
+        backendConnect.disabled = false;
+        if (connectedNew) {
+          setTimeout(() => { backendBusy = false; }, 1500);
+        } else {
+          // Probe failed — let the snapshot mirror resume showing the still-
+          // active old connection (or stay paused if there isn't one).
+          backendBusy = false;
+        }
+      }
+    });
+  }
+
+  if (backendSwap) {
+    backendSwap.addEventListener('click', () => {
+      const choice = prompt(
+        'Hot-swap the CONNECTED server\'s hardware between sim and real.\n' +
+        'Type "sim" or "real" (only works when the connected machine can open real I/O — i.e. on the Pi):',
+        'real'
+      );
+      if (!choice) return;
+      const tgt = choice.trim().toLowerCase();
+      if (tgt !== 'sim' && tgt !== 'real') {
+        alert('Type "sim" or "real" (got: ' + choice + ')');
+        return;
+      }
+      send('backend.swap', { target: tgt });
+    });
   }
 
   // ---- canvas sizing -------------------------------------------------
@@ -363,6 +571,7 @@
   }
 
   // ---- Cut pattern controls -------------------------------------------
+  const patPreset = document.getElementById('pat-preset');
   const patDeck = document.getElementById('pat-deck');
   const patOverlap = document.getElementById('pat-overlap');
   const patHeadland = document.getElementById('pat-headland');
@@ -377,9 +586,24 @@
   bindRange(patDeck, document.getElementById('pat-deck-val'), 2);
   bindRange(patOverlap, document.getElementById('pat-overlap-val'), 0);
   bindRange(patHeadland, document.getElementById('pat-headland-val'), 2);
+
+  // Some presets ignore "axis" and "crosscut" — grey them out for clarity.
+  function refreshPatternEnable() {
+    const preset = patPreset ? patPreset.value : 'boustrophedon';
+    const axisRelevant = (preset === 'boustrophedon' || preset === 'wave');
+    const crossRelevant = (preset === 'boustrophedon');
+    if (patAxis)  patAxis.disabled  = !axisRelevant;
+    if (patCross) patCross.disabled = !crossRelevant;
+  }
+  if (patPreset) {
+    patPreset.addEventListener('change', refreshPatternEnable);
+    refreshPatternEnable();
+  }
+
   if (patApply) {
     patApply.addEventListener('click', () => {
       const payload = {
+        pattern: patPreset ? patPreset.value : 'boustrophedon',
         deck_m: parseFloat(patDeck.value),
         overlap_pct: parseFloat(patOverlap.value) / 100,
         headland_m: parseFloat(patHeadland.value),
@@ -406,12 +630,22 @@
       document.getElementById('pat-headland-val').textContent = (+p.headland_m).toFixed(2);
       patAxis.value = p.primary_axis || 'h';
       patCross.checked = !!p.crosscut;
+      if (patPreset) {
+        patPreset.value = p.pattern || 'boustrophedon';
+        refreshPatternEnable();
+      }
       patSyncedFromServer = true;
     }
     if (s.sim && !speedSyncedFromServer && simSpeed) {
       simSpeed.value = s.sim.time_scale;
       simSpeedVal.textContent = (+s.sim.time_scale).toFixed(2);
       speedSyncedFromServer = true;
+    }
+    // Show the server's current hardware backend in the status line, but
+    // don't clobber an in-flight discovery / "connecting" message.
+    if (s.backend && backendStatus && !backendBusy) {
+      const label = backendBase ? backendBase : 'local';
+      backendStatus.textContent = `connected · ${label} · server backend: ${s.backend.toUpperCase()}`;
     }
     // Pattern status from waypoint count.
     if (patStatus && s.mission) {

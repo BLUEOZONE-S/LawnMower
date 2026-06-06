@@ -29,8 +29,15 @@ class Hardware:
     world: Any = None  # populated in sim mode so Runtime can stop it on shutdown
 
 
-def make_hardware(cfg: Config) -> Hardware:
-    if cfg.sim.enabled:
+def make_hardware(cfg: Config, force_sim: bool | None = None) -> Hardware:
+    """Build the hardware backend.
+
+    ``force_sim`` overrides ``cfg.sim.enabled`` — used by
+    :meth:`Runtime.swap_backend` for in-process hot-swap. When ``None`` the
+    config flag wins.
+    """
+    use_sim = cfg.sim.enabled if force_sim is None else bool(force_sim)
+    if use_sim:
         log.info("hardware backend: SIMULATION")
         return _build_sim(cfg)
     log.info("hardware backend: real Pi peripherals")

@@ -134,6 +134,7 @@ class Runtime:
             "overlap_pct": 0.0,
             "crosscut": True,
             "primary_axis": "h",
+            "pattern": "boustrophedon",
         }
 
         # PID auto-tuner — built lazily; the UI flips it on/off.
@@ -211,6 +212,7 @@ class Runtime:
                 "enabled": self.cfg.sim.enabled,
                 "time_scale": self._sim_world.time_scale if self._sim_world else 1.0,
             },
+            "backend": "sim" if self._sim_world is not None else "real",
             "autotune": self.autotuner.snapshot(),
             "boundary": list(self.boundary_enu) if self.boundary_enu else None,
             "keepouts": [{"label": "k", "points": list(p)} for p in self.keepouts_enu],
@@ -242,6 +244,7 @@ class Runtime:
             "sim.speed": self._cmd_sim_speed,
             "autotune.start": self._cmd_autotune_start,
             "autotune.stop": self._cmd_autotune_stop,
+            "backend.swap": self._cmd_backend_swap,
         }
         h = handlers.get(name)
         if not h:
@@ -283,6 +286,10 @@ class Runtime:
         primary_axis = p.get("primary_axis", "h")
         if primary_axis not in ("h", "v"):
             primary_axis = "h"
+        from .nav.planner import PATTERN_NAMES
+        pattern = str(p.get("pattern", "boustrophedon")).lower()
+        if pattern not in PATTERN_NAMES:
+            pattern = "boustrophedon"
 
         params = PlanParams(
             deck_m=deck_m,
@@ -292,6 +299,7 @@ class Runtime:
             headland_m=headland,
             overlap_pct=overlap,
             primary_axis=primary_axis,
+            pattern=pattern,
         )
         self.path = plan_coverage(self.boundary_enu, self.keepouts_enu, params)
         self.mission.load_path(self.path)
@@ -303,11 +311,11 @@ class Runtime:
             "overlap_pct": overlap,
             "crosscut": crosscut,
             "primary_axis": primary_axis,
+            "pattern": pattern,
         }
         self.event(
-            f"plan: {len(self.path)} waypoints "
-            f"(deck={deck_m:.2f}m overlap={overlap*100:.0f}% headland={headland:.2f}m "
-            f"axis={primary_axis}{' +cross' if crosscut else ''})"
+            f"plan: {len(self.path)} waypoints — {pattern} "
+            f"(deck={deck_m:.2f}m overlap={overlap*100:.0f}% headland={headland:.2f}m)"
         )
         return {"ok": True, "n": len(self.path), "params": self._last_plan_params}
 
@@ -465,6 +473,107 @@ class Runtime:
 
         self.event(f"sim reset → ({x:.2f}, {y:.2f}, θ={math.degrees(theta):.0f}°)")
         return {"ok": True, "x": x, "y": y, "theta_rad": theta}
+
+    def _cmd_backend_swap(self, payload):
+        """Hot-swap between sim and real Pi hardware *in this process*.
+
+        Only meaningful on the Pi (Windows can't open I2C/pigpio/UART). On a
+        machine that can't open real hardware, the rebuild fails and we
+        gracefully roll back to the prior backend so the rover doesn't end up
+        with a half-initialized HAT.
+        """
+        target = (payload or {}).get("target", "").lower()
+        if target not in ("sim", "real"):
+            return {"error": "target must be 'sim' or 'real'"}
+        currently_sim = self._sim_world is not None
+        want_sim = (target == "sim")
+        if currently_sim == want_sim:
+            return {"ok": True, "msg": f"already on {target} backend"}
+        return self.swap_backend(want_sim)
+
+    def swap_backend(self, want_sim: bool) -> dict:
+        log.info("swap_backend → %s", "sim" if want_sim else "real")
+        # 1) Pause the control loop's hardware-touching dispatch via the safety
+        # gate — the loop's "armed=False" branch just calls motors.stop() and
+        # skips dispatch. We rearm at the end (or on rollback).
+        was_armed = self.safety.snapshot().armed
+        self.safety.request_stop("backend swap")
+
+        # 2) Hold references to the old hardware so we can either tear them
+        # down AFTER the new ones come up, or roll back if the build fails.
+        old = {
+            "motors": self.motors, "servo": self.servo, "gps": self.gps,
+            "imu": self.imu, "odom": self.odom, "pisugar": self.pisugar,
+            "ntrip": self.ntrip, "world": self._sim_world,
+        }
+        # Stop the wheels but leave the rest of the old backend alive in case
+        # we need to roll back.
+        try: old["motors"].stop()
+        except Exception: pass
+
+        # 3) Build new hardware. On Windows, target='real' will raise here
+        # (smbus2/pigpio/etc. can't open hardware) → roll back cleanly.
+        try:
+            new_hw = make_hardware(self.cfg, force_sim=want_sim)
+        except Exception as e:
+            log.exception("swap_backend: build failed, rolling back")
+            if was_armed:
+                self.safety.rearm()
+            return {"error": f"failed to build {('sim' if want_sim else 'real')} backend: {e}"}
+
+        # 4) Wire new hardware in.
+        self.motors = new_hw.motors
+        self.servo = new_hw.servo
+        self.gps = new_hw.gps
+        self.imu = new_hw.imu
+        self.odom = new_hw.odom
+        self.pisugar = new_hw.pisugar
+        self.ntrip = new_hw.ntrip
+        self._sim_world = new_hw.world
+        try: self.ntrip.start()
+        except Exception as e: log.warning("ntrip start after swap: %s", e)
+
+        # 5) Tear down the old hardware in the background so we don't block on
+        # a slow socket close. NTRIP must stop here, not before, so a failed
+        # build leaves the old corrections stream running.
+        def _close_old():
+            try: old["ntrip"].stop()
+            except Exception: pass
+            for k in ("motors", "servo", "gps"):
+                try: getattr(old[k], "close")()
+                except Exception: pass
+            if old.get("world"):
+                try: old["world"].stop()
+                except Exception: pass
+        threading.Thread(target=_close_old, daemon=True).start()
+
+        # 6) Reset world model state — new backend has its own pose.
+        self.path = []
+        self.covered.clear()
+        self.mission.load_path([])
+        self.mission.stop()
+        self.stuck.reset()
+        self.controller.pid.reset()
+        self._last_target = None
+
+        # 7) Seed estimator + safety appropriately for the new backend.
+        self.safety.pisugar = self.pisugar
+        if want_sim:
+            s = self.cfg.sim
+            self.origin = Origin(lat=s.origin_lat, lon=s.origin_lon)
+            self.estimator = Estimator(self.cfg.estimator, self.origin)
+            self.estimator.seed(s.start_x, s.start_y, math.radians(s.start_theta_deg))
+            self.safety.est = self.estimator
+        else:
+            # Real backend: wait for the first GPS fix to anchor.
+            self.origin = None
+            self.estimator = None
+            self._ensure_estimator()
+            self.safety.est = self.estimator
+
+        self.safety.rearm()
+        self.event(f"backend swapped → {'SIM' if want_sim else 'REAL'}")
+        return {"ok": True, "backend": "sim" if want_sim else "real"}
 
     def _cmd_autotune_start(self, _payload):
         st = self.mission.snapshot().state
