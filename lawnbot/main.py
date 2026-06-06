@@ -26,6 +26,7 @@ from . import config
 from .drive.kinematics import vd_to_command
 from .estimator import Estimator
 from .hardware import make_hardware
+from .hardware_probe import HardwareProbe
 from .nav.controller import Controller
 from .nav.geo import Origin, centroid_ll, to_enu
 from .nav.geometry import Polygon, bbox, point_in_polygon
@@ -122,6 +123,13 @@ class Runtime:
         except Exception as e:
             log.warning("NTRIP not started: %s", e)
 
+        # Live hardware/host probe — surfaced in snapshot() for the UI status panel.
+        self.hw_probe = HardwareProbe(scan_interval_s=2.0)
+        try:
+            self.hw_probe.attach_gps_reader(self.gps)
+        except Exception:
+            pass
+
         # Plan-time defaults exposed in the snapshot so the UI sliders mirror
         # the current pattern (deck, overlap, headland, axis).
         default_headland = 0.0
@@ -191,7 +199,7 @@ class Runtime:
                 "sats_age_s": sat_age,
             },
             "gps_xy": self.last_gps_xy,
-            "battery": {"percent": sstat.battery_pct, "charging": sstat.charging},
+            "battery": self._battery_snapshot(sstat),
             "mission": {
                 "state": mstat.state.value if hasattr(mstat.state, "value") else str(mstat.state),
                 "waypoint_idx": mstat.waypoint_idx,
@@ -221,7 +229,36 @@ class Runtime:
             "teach": self.teach.snapshot() if self.teach else None,
             "events": list(self.events),
         }
+        # Merge in hardware-presence + host metrics for the UI status panel.
+        try:
+            out.update(self.hw_probe.snapshot())
+        except Exception:
+            log.exception("hw_probe.snapshot failed")
         return out
+
+    def _battery_snapshot(self, sstat) -> dict:
+        """Rich PiSugar battery state for the UI. Falls back to the safety-monitor
+        view if the PiSugar socket is down or the driver doesn't expose details."""
+        st = getattr(self.pisugar, "state", None)
+        if st is not None and getattr(st, "available", False):
+            return {
+                "percent": st.percent,
+                "charging": st.charging,
+                "plugged": getattr(st, "plugged", False),
+                "voltage_v": getattr(st, "voltage_v", 0.0),
+                "current_a": getattr(st, "current_a", 0.0),
+                "model": getattr(st, "model", ""),
+                "available": True,
+            }
+        return {
+            "percent": sstat.battery_pct,
+            "charging": sstat.charging,
+            "plugged": False,
+            "voltage_v": 0.0,
+            "current_a": 0.0,
+            "model": "",
+            "available": False,
+        }
 
     def command(self, name: str, payload: dict) -> dict:
         handlers = {

@@ -214,6 +214,28 @@
     </div>
   </section>
 
+  <section id="panel-hardware" class="floating panel" data-panel-label="Hardware">
+    <header class="dragbar">
+      <span class="title">Hardware status</span><span class="spacer"></span>
+      <button class="close-btn">×</button>
+    </header>
+    <div class="body">
+      <div class="hw-section">
+        <div class="hw-section-title">Devices</div>
+        <ul id="hw-devices" class="hw-list"></ul>
+      </div>
+      <div class="hw-section">
+        <div class="hw-section-title">Battery (PiSugar)</div>
+        <div id="hw-battery" class="hw-battery">—</div>
+      </div>
+      <div class="hw-section">
+        <div class="hw-section-title">Host (Pi)</div>
+        <ul id="hw-host" class="hw-list compact"></ul>
+      </div>
+      <div class="hint" id="hw-scan-age">scan age —</div>
+    </div>
+  </section>
+
   <section id="panel-events" class="floating panel" data-panel-label="Events">
     <header class="dragbar">
       <span class="title">Events</span><span class="spacer"></span>

@@ -130,6 +130,43 @@ main { height: calc(100% - 36px); }
 .floating .legend .sw { display: inline-block; width: 10px; height: 10px;
   border-radius: 2px; margin-right: 4px; vertical-align: middle; }
 
+/* ---- Hardware status panel ------------------------------------------ */
+.hw-section { margin-bottom: 10px; }
+.hw-section-title {
+  font-size: 11px; color: #8a96a3; text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 5px;
+}
+.hw-list { list-style: none; margin: 0; padding: 0; }
+.hw-list li {
+  display: flex; align-items: center; justify-content: space-between;
+  font: 12px/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  color: #c8d2db; padding: 2px 0;
+}
+.hw-list.compact li { padding: 1px 0; font-size: 11px; }
+.hw-list .hw-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.hw-list .hw-val  { color: #8a96a3; font-variant-numeric: tabular-nums; }
+.hw-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 50%;
+  background: #4a5566; flex: 0 0 9px;
+}
+.hw-dot.ok    { background: #34c777; box-shadow: 0 0 6px #34c77770; }
+.hw-dot.bad   { background: #c74e4e; }
+.hw-dot.warn  { background: #d6a740; }
+.hw-battery {
+  background: #0c1014; border: 1px solid #1d2530; border-radius: 6px;
+  padding: 6px 8px; color: #c8d2db; font-size: 12px;
+}
+.hw-battery .hw-bar {
+  height: 6px; background: #1d2530; border-radius: 3px; overflow: hidden; margin: 5px 0;
+}
+.hw-battery .hw-bar-fill {
+  height: 100%; background: linear-gradient(90deg, #c74e4e 0%, #d6a740 30%, #34c777 60%);
+  width: 0%; transition: width 0.5s;
+}
+.hw-battery .hw-row {
+  display: flex; justify-content: space-between; font-size: 11px; color: #8a96a3;
+}
+
 /* ---- Bottom dock — one toggle button per panel ----------------------- */
 #dock {
   position: fixed;

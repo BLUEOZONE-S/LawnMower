@@ -383,6 +383,8 @@
       breakdown.textContent = `P ${s.control.pid.p.toFixed(2)}  I ${s.control.pid.i.toFixed(2)}  D ${s.control.pid.d.toFixed(2)}`;
     }
 
+    renderHardware(s);
+
     // Events feed
     if (s.events && s.events.length) {
       evList.innerHTML = '';
@@ -1117,4 +1119,88 @@
       mirrorAuxFromState(state);
     }
   };
+
+  // ---- Hardware status panel ----------------------------------------
+  function renderHardware(s) {
+    const hw = s.hardware || {};
+    const sys = s.system || {};
+    const batt = s.battery || {};
+
+    // Device list
+    const devUl = document.getElementById('hw-devices');
+    if (devUl) {
+      const items = [];
+      // Each I2C address from the probe
+      (hw.devices || []).forEach(d => {
+        const dot = d.present ? 'ok' : 'bad';
+        const val = d.present ? 'present' : 'absent';
+        items.push(`<li><span class="hw-name"><span class="hw-dot ${dot}"></span>${d.addr} · ${d.label}</span><span class="hw-val">${val}</span></li>`);
+      });
+      // Serial0 (GPS UART)
+      const s0 = hw.serial0 || {};
+      const s0dot = s0.present ? 'ok' : 'bad';
+      const s0val = s0.present ? (s0.target || 'ok') : 'missing';
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${s0dot}"></span>${s0.path || '/dev/serial0'} · GPS UART</span><span class="hw-val">${s0val}</span></li>`);
+      // GPS fix as a separate health signal
+      const q = ['invalid', 'single', 'DGPS', 'PPS', 'RTK-fixed', 'RTK-float'];
+      const gpsq = s.gps?.quality ?? 0;
+      const gpsDot = gpsq >= 4 ? 'ok' : (gpsq >= 1 ? 'warn' : 'bad');
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${gpsDot}"></span>GPS fix · ${q[gpsq] || '—'}</span><span class="hw-val">${s.gps?.sats ?? 0} sats</span></li>`);
+      // GPIO chip
+      const gp = hw.gpiochip || {};
+      const gpDot = gp.accessible ? 'ok' : 'bad';
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${gpDot}"></span>${gp.path || '/dev/gpiochip*'} · Servo GPIO</span><span class="hw-val">${gp.accessible ? 'rw' : 'no access'}</span></li>`);
+      // PiSugar socket
+      const psSockDot = hw.pisugar_socket ? 'ok' : 'bad';
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${psSockDot}"></span>pisugar-server · /tmp/pisugar-server.sock</span><span class="hw-val">${hw.pisugar_socket ? 'up' : 'down'}</span></li>`);
+      devUl.innerHTML = items.join('');
+    }
+
+    // Battery block
+    const battEl = document.getElementById('hw-battery');
+    if (battEl) {
+      if (!batt.available) {
+        battEl.innerHTML = '<span style="color:#8a96a3">no PiSugar detected</span>';
+      } else {
+        const pct = Math.max(0, Math.min(100, batt.percent || 0));
+        const mode = batt.charging ? 'charging' : (batt.plugged ? 'plugged · idle' : 'on battery');
+        const curr_mA = (batt.current_a || 0) * 1000;
+        const sign = curr_mA >= 0 ? '+' : '';
+        battEl.innerHTML = `
+          <div class="hw-row"><b style="color:#e7ecef">${batt.model || 'PiSugar'}</b><span>${mode}</span></div>
+          <div class="hw-bar"><div class="hw-bar-fill" style="width:${pct}%"></div></div>
+          <div class="hw-row"><span>${pct.toFixed(0)}%</span><span>${(batt.voltage_v || 0).toFixed(2)} V · ${sign}${curr_mA.toFixed(0)} mA</span></div>
+        `;
+      }
+    }
+
+    // Host metrics (RAM/CPU/temp/uptime)
+    const hostUl = document.getElementById('hw-host');
+    if (hostUl) {
+      const uptime = formatUptime(sys.uptime_s || 0);
+      const cpuDot = (sys.cpu_pct ?? 0) > 85 ? 'warn' : 'ok';
+      const tempDot = (sys.temp_c ?? 0) > 75 ? 'warn' : ((sys.temp_c ?? 0) > 0 ? 'ok' : 'bad');
+      const memDot = (sys.mem_pct ?? 0) > 85 ? 'warn' : 'ok';
+      hostUl.innerHTML = [
+        `<li><span class="hw-name"><span class="hw-dot ${cpuDot}"></span>CPU</span><span class="hw-val">${(sys.cpu_pct ?? 0).toFixed(0)}%  ld ${(sys.load_1 ?? 0).toFixed(2)}</span></li>`,
+        `<li><span class="hw-name"><span class="hw-dot ${memDot}"></span>RAM</span><span class="hw-val">${(sys.mem_used_mb ?? 0).toFixed(0)} / ${(sys.mem_total_mb ?? 0).toFixed(0)} MB (${(sys.mem_pct ?? 0).toFixed(0)}%)</span></li>`,
+        `<li><span class="hw-name"><span class="hw-dot ${tempDot}"></span>Temp</span><span class="hw-val">${(sys.temp_c ?? 0).toFixed(1)} °C</span></li>`,
+        `<li><span class="hw-name"><span class="hw-dot ok"></span>Uptime</span><span class="hw-val">${uptime}</span></li>`,
+      ].join('');
+    }
+
+    const ageEl = document.getElementById('hw-scan-age');
+    if (ageEl) ageEl.textContent = `scan age ${(hw.last_scan_age_s ?? 0).toFixed(1)}s`;
+  }
+
+  function formatUptime(s) {
+    s = Math.floor(s);
+    const d = Math.floor(s / 86400); s -= d * 86400;
+    const h = Math.floor(s / 3600); s -= h * 3600;
+    const m = Math.floor(s / 60); s -= m * 60;
+    if (d) return `${d}d ${h}h`;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
 })();
