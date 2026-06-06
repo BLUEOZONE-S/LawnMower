@@ -688,10 +688,171 @@
     }
   }
 
-  // ---- GNSS debug panel ---------------------------------------------------
+  // ---- Floating panel system ---------------------------------------------
+  // Every former sidebar group is now a draggable, dockable window. The dock
+  // along the bottom of the page has one toggle button per panel. Position +
+  // visibility persist per panel in localStorage.
+  //
+  // Default positions are picked so the panels stack neatly on the right edge
+  // of the screen on first run; users can drag them anywhere and the new
+  // position survives reloads.
+  const PANELS = [
+    { id: 'panel-mission', initial: { right: 16,  top: 60  }, openByDefault: true  },
+    { id: 'panel-mode',    initial: { right: 16,  top: 280 }, openByDefault: true  },
+    { id: 'panel-backend', initial: { right: 16,  top: 360 }, openByDefault: false },
+    { id: 'panel-sim',     initial: { right: 16,  top: 540 }, openByDefault: false },
+    { id: 'panel-pattern', initial: { right: 290, top: 60  }, openByDefault: false },
+    { id: 'panel-tune',    initial: { right: 290, top: 360 }, openByDefault: false },
+    { id: 'panel-teach',   initial: { right: 290, top: 480 }, openByDefault: false },
+    { id: 'panel-pid',     initial: { right: 290, top: 620 }, openByDefault: false },
+    { id: 'panel-manual',  initial: { right: 564, top: 60  }, openByDefault: false },
+    { id: 'panel-layers',  initial: { right: 564, top: 320 }, openByDefault: true  },
+    { id: 'panel-events',  initial: { right: 564, top: 470 }, openByDefault: true  },
+    { id: 'gnss-panel',    initial: { left: 16,   bottom: 110 }, openByDefault: false },
+  ];
+
+  const PANEL_STORAGE_KEY = (id, kind) => `lawnbot_panel_${id}_${kind}`;
+  let panelZ = 100;
+  function bringToFront(panel) { panel.style.zIndex = ++panelZ; }
+
+  function clampToViewport(left, top, w, h) {
+    const vw = window.innerWidth, vh = window.innerHeight;
+    left = Math.max(0, Math.min(left, vw - 40));     // keep dragbar grabbable
+    top  = Math.max(36, Math.min(top, vh - 40));     // header is 36px
+    return [left, top];
+  }
+
+  function setPanelPosition(panel, pos) {
+    panel.style.left   = (pos.left   != null) ? pos.left   + 'px' : 'auto';
+    panel.style.top    = (pos.top    != null) ? pos.top    + 'px' : 'auto';
+    panel.style.right  = (pos.right  != null) ? pos.right  + 'px' : 'auto';
+    panel.style.bottom = (pos.bottom != null) ? pos.bottom + 'px' : 'auto';
+  }
+
+  function setupPanel(spec) {
+    const panel = document.getElementById(spec.id);
+    if (!panel) return null;
+
+    // Restore saved position, else use initial.
+    let savedPos = null;
+    try { savedPos = JSON.parse(localStorage.getItem(PANEL_STORAGE_KEY(spec.id, 'pos')) || 'null'); } catch (e) {}
+    if (savedPos && savedPos.left != null && savedPos.top != null) {
+      setPanelPosition(panel, { left: savedPos.left, top: savedPos.top });
+    } else {
+      setPanelPosition(panel, spec.initial);
+    }
+
+    // Restore visibility (default to spec.openByDefault).
+    const savedVis = localStorage.getItem(PANEL_STORAGE_KEY(spec.id, 'visible'));
+    const visible = (savedVis === null) ? spec.openByDefault : (savedVis === 'true');
+    panel.style.display = visible ? '' : 'none';
+
+    // Drag from the .dragbar header.
+    const handle = panel.querySelector('.dragbar');
+    if (handle) {
+      let drag = null;
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.target.tagName === 'BUTTON' || e.target.closest('button')) return;
+        bringToFront(panel);
+        const r = panel.getBoundingClientRect();
+        drag = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId };
+        handle.setPointerCapture(e.pointerId);
+      });
+      handle.addEventListener('pointermove', (e) => {
+        if (!drag || drag.id !== e.pointerId) return;
+        let left = e.clientX - drag.dx;
+        let top  = e.clientY - drag.dy;
+        const r = panel.getBoundingClientRect();
+        [left, top] = clampToViewport(left, top, r.width, r.height);
+        setPanelPosition(panel, { left, top });
+      });
+      const release = (e) => {
+        if (!drag) return;
+        drag = null;
+        try { handle.releasePointerCapture(e.pointerId); } catch (_) {}
+        const r = panel.getBoundingClientRect();
+        localStorage.setItem(
+          PANEL_STORAGE_KEY(spec.id, 'pos'),
+          JSON.stringify({ left: r.left, top: r.top })
+        );
+      };
+      handle.addEventListener('pointerup', release);
+      handle.addEventListener('pointercancel', release);
+    }
+    // Bring to front when clicking anywhere in the panel body, so the active
+    // panel is always above the others.
+    panel.addEventListener('pointerdown', () => bringToFront(panel));
+
+    // Close button (×) in the header
+    const closeBtn = panel.querySelector('.dragbar .close-btn');
+    if (closeBtn) {
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        setPanelVisible(spec.id, false);
+      });
+    }
+    return panel;
+  }
+
+  function setPanelVisible(id, visible) {
+    const panel = document.getElementById(id);
+    if (!panel) return;
+    panel.style.display = visible ? '' : 'none';
+    localStorage.setItem(PANEL_STORAGE_KEY(id, 'visible'), String(!!visible));
+    if (visible) bringToFront(panel);
+    updateDockButton(id);
+  }
+
+  function updateDockButton(id) {
+    const btn = document.querySelector(`#dock button[data-panel="${id}"]`);
+    const panel = document.getElementById(id);
+    if (!btn || !panel) return;
+    const visible = panel.style.display !== 'none';
+    btn.classList.toggle('active', visible);
+  }
+
+  function buildDock() {
+    const dock = document.getElementById('dock');
+    if (!dock) return;
+    dock.innerHTML = '';
+    for (const spec of PANELS) {
+      const panel = document.getElementById(spec.id);
+      if (!panel) continue;
+      const label = panel.dataset.panelLabel || spec.id;
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      btn.dataset.panel = spec.id;
+      btn.addEventListener('click', () => {
+        const isVisible = panel.style.display !== 'none';
+        setPanelVisible(spec.id, !isVisible);
+      });
+      dock.appendChild(btn);
+    }
+    // Tiny "reset" button to recover from off-screen panels.
+    const reset = document.createElement('button');
+    reset.textContent = 'reset layout';
+    reset.title = 'Restore default positions for every panel';
+    reset.style.marginLeft = 'auto';
+    reset.addEventListener('click', () => {
+      for (const spec of PANELS) {
+        localStorage.removeItem(PANEL_STORAGE_KEY(spec.id, 'pos'));
+        localStorage.removeItem(PANEL_STORAGE_KEY(spec.id, 'visible'));
+        const panel = document.getElementById(spec.id);
+        if (!panel) continue;
+        setPanelPosition(panel, spec.initial);
+        panel.style.display = spec.openByDefault ? '' : 'none';
+        updateDockButton(spec.id);
+      }
+    });
+    dock.appendChild(reset);
+  }
+
+  for (const spec of PANELS) setupPanel(spec);
+  buildDock();
+  for (const spec of PANELS) updateDockButton(spec.id);
+
+  // Keep references to the canvases used by the GNSS panel rendering below.
   const gnssPanel = document.getElementById('gnss-panel');
-  const gnssToggle = document.getElementById('gnss-toggle');
-  const gnssCollapseBtn = document.getElementById('gnss-collapse');
   const skyCanvas = document.getElementById('gnss-sky');
   const sphereCanvas = document.getElementById('gnss-sphere');
   const barsCanvas = document.getElementById('gnss-bars');
@@ -710,41 +871,6 @@
     'Mixed':   '#dddddd',
   };
   const colorFor = (c) => CONSTELLATION_COLOR[c] || '#cccccc';
-
-  // Drag-to-move on the panel header.
-  (function makeDraggable() {
-    const handle = gnssPanel.querySelector('.dragbar');
-    let down = null;
-    handle.addEventListener('pointerdown', e => {
-      // Ignore presses on the collapse button.
-      if (e.target.tagName === 'BUTTON') return;
-      const r = gnssPanel.getBoundingClientRect();
-      down = { dx: e.clientX - r.left, dy: e.clientY - r.top, id: e.pointerId };
-      handle.setPointerCapture(e.pointerId);
-    });
-    handle.addEventListener('pointermove', e => {
-      if (!down || down.id !== e.pointerId) return;
-      gnssPanel.style.left = (e.clientX - down.dx) + 'px';
-      gnssPanel.style.top  = (e.clientY - down.dy) + 'px';
-      gnssPanel.style.bottom = 'auto';
-    });
-    const release = e => { down = null; };
-    handle.addEventListener('pointerup', release);
-    handle.addEventListener('pointercancel', release);
-  })();
-
-  // Collapse / show buttons.
-  function showPanel() {
-    gnssPanel.style.display = '';
-    gnssPanel.classList.remove('collapsed');
-    gnssToggle.classList.remove('shown');
-  }
-  function hidePanel() {
-    gnssPanel.style.display = 'none';
-    gnssToggle.classList.add('shown');
-  }
-  gnssCollapseBtn.addEventListener('click', hidePanel);
-  gnssToggle.addEventListener('click', showPanel);
 
   function renderGnss(s) {
     const gps = s.gps || {};
