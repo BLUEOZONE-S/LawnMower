@@ -710,6 +710,7 @@
     { id: 'panel-manual',  initial: { right: 564, top: 60  }, openByDefault: false },
     { id: 'panel-layers',  initial: { right: 564, top: 320 }, openByDefault: true  },
     { id: 'panel-events',  initial: { right: 564, top: 470 }, openByDefault: true  },
+    { id: 'panel-hardware',initial: { left: 16,   top: 60  }, openByDefault: true  },
     { id: 'gnss-panel',    initial: { left: 16,   bottom: 110 }, openByDefault: false },
   ];
 
@@ -1121,76 +1122,130 @@
   };
 
   // ---- Hardware status panel ----------------------------------------
+  let _hwTickCount = 0;
   function renderHardware(s) {
+    _hwTickCount++;
     const hw = s.hardware || {};
     const sys = s.system || {};
     const batt = s.battery || {};
+    const isSim = !!(s.sim && s.sim.enabled);
 
-    // Device list
+    // Update the panel title with sim/real indicator
+    const titleEl = document.querySelector('#panel-hardware .dragbar .title');
+    if (titleEl) {
+      titleEl.innerHTML = `Hardware status ${isSim ? '<span style="color:#d6a740;font-size:10px;background:#3a2f10;padding:1px 5px;border-radius:3px;margin-left:4px;">SIM MODE</span>' : ''}`;
+    }
+
+    // Device list — every row reflects REAL hardware presence regardless of sim mode
     const devUl = document.getElementById('hw-devices');
     if (devUl) {
       const items = [];
-      // Each I2C address from the probe
+
+      // I2C devices — direct readout from the live bus
       (hw.devices || []).forEach(d => {
         const dot = d.present ? 'ok' : 'bad';
-        const val = d.present ? 'present' : 'absent';
+        const val = d.present ? 'present' : 'not on bus';
         items.push(`<li><span class="hw-name"><span class="hw-dot ${dot}"></span>${d.addr} · ${d.label}</span><span class="hw-val">${val}</span></li>`);
       });
-      // Serial0 (GPS UART)
+
+      // GPS UART — distinguishes "symlink exists" from "real GPS is wired".
+      // In sim mode the service never reads the real UART, so byte-count and
+      // gps.quality are virtual; we deliberately mark the row as "indeterminate"
+      // until the user runs in real mode.
       const s0 = hw.serial0 || {};
-      const s0dot = s0.present ? 'ok' : 'bad';
-      const s0val = s0.present ? (s0.target || 'ok') : 'missing';
-      items.push(`<li><span class="hw-name"><span class="hw-dot ${s0dot}"></span>${s0.path || '/dev/serial0'} · GPS UART</span><span class="hw-val">${s0val}</span></li>`);
-      // GPS fix as a separate health signal
-      const q = ['invalid', 'single', 'DGPS', 'PPS', 'RTK-fixed', 'RTK-float'];
       const gpsq = s.gps?.quality ?? 0;
-      const gpsDot = gpsq >= 4 ? 'ok' : (gpsq >= 1 ? 'warn' : 'bad');
-      items.push(`<li><span class="hw-name"><span class="hw-dot ${gpsDot}"></span>GPS fix · ${q[gpsq] || '—'}</span><span class="hw-val">${s.gps?.sats ?? 0} sats</span></li>`);
-      // GPIO chip
+      const bytes = s0.bytes_total || 0;
+      let s0Dot, s0Val;
+      if (!s0.present) {
+        s0Dot = 'bad'; s0Val = 'symlink missing';
+      } else if (isSim) {
+        s0Dot = 'warn'; s0Val = 'sim mode · real UART not probed';
+      } else if (bytes > 0 || gpsq > 0) {
+        s0Dot = 'ok'; s0Val = `${bytes ? bytes + ' B' : 'fix ' + gpsq}`;
+      } else {
+        s0Dot = 'warn'; s0Val = 'no NMEA — GPS unplugged?';
+      }
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${s0Dot}"></span>${s0.path || '/dev/serial0'} · GPS UART</span><span class="hw-val">${s0Val}</span></li>`);
+
+      // GPS fix quality — in sim mode this is the virtual fix, marked clearly
+      const q = ['no fix', 'single', 'DGPS', 'PPS', 'RTK-fixed', 'RTK-float'];
+      let gpsDot;
+      if (isSim) {
+        gpsDot = 'warn';   // yellow — it's a virtual fix, not from a real receiver
+      } else {
+        gpsDot = gpsq >= 4 ? 'ok' : (gpsq >= 1 ? 'warn' : 'bad');
+      }
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${gpsDot}"></span>GPS fix${isSim ? ' (virtual)' : ''}</span><span class="hw-val">${q[gpsq] || '—'} · ${s.gps?.sats ?? 0} sats</span></li>`);
+
+      // GPIO chip — header GPIO accessibility for the servo
       const gp = hw.gpiochip || {};
       const gpDot = gp.accessible ? 'ok' : 'bad';
       items.push(`<li><span class="hw-name"><span class="hw-dot ${gpDot}"></span>${gp.path || '/dev/gpiochip*'} · Servo GPIO</span><span class="hw-val">${gp.accessible ? 'rw' : 'no access'}</span></li>`);
-      // PiSugar socket
+
+      // PiSugar daemon socket
       const psSockDot = hw.pisugar_socket ? 'ok' : 'bad';
-      items.push(`<li><span class="hw-name"><span class="hw-dot ${psSockDot}"></span>pisugar-server · /tmp/pisugar-server.sock</span><span class="hw-val">${hw.pisugar_socket ? 'up' : 'down'}</span></li>`);
+      items.push(`<li><span class="hw-name"><span class="hw-dot ${psSockDot}"></span>pisugar-server · /tmp/pisugar-server.sock</span><span class="hw-val">${hw.pisugar_socket ? 'up' : 'not installed'}</span></li>`);
+
       devUl.innerHTML = items.join('');
     }
 
-    // Battery block
+    // Battery block — distinguishes REAL PiSugar vs SIM virtual battery
+    // Real PiSugar requires BOTH the daemon socket up AND an I2C device present.
+    // Without those, the only "battery" reading is the sim virtual battery.
     const battEl = document.getElementById('hw-battery');
     if (battEl) {
-      if (!batt.available) {
-        battEl.innerHTML = '<span style="color:#8a96a3">no PiSugar detected</span>';
-      } else {
+      const realPiSugar = hw.pisugar_socket && hw.pisugar;
+      if (realPiSugar && batt.available) {
         const pct = Math.max(0, Math.min(100, batt.percent || 0));
         const mode = batt.charging ? 'charging' : (batt.plugged ? 'plugged · idle' : 'on battery');
         const curr_mA = (batt.current_a || 0) * 1000;
         const sign = curr_mA >= 0 ? '+' : '';
         battEl.innerHTML = `
-          <div class="hw-row"><b style="color:#e7ecef">${batt.model || 'PiSugar'}</b><span>${mode}</span></div>
+          <div class="hw-row"><b style="color:#34c777">${batt.model || 'PiSugar'} · live</b><span>${mode}</span></div>
           <div class="hw-bar"><div class="hw-bar-fill" style="width:${pct}%"></div></div>
           <div class="hw-row"><span>${pct.toFixed(0)}%</span><span>${(batt.voltage_v || 0).toFixed(2)} V · ${sign}${curr_mA.toFixed(0)} mA</span></div>
         `;
+      } else if (isSim) {
+        // Sim battery — clearly labeled, not pretending to be a PiSugar
+        const pct = Math.max(0, Math.min(100, batt.percent || 0));
+        battEl.innerHTML = `
+          <div class="hw-row"><b style="color:#d6a740">virtual battery · sim only</b><span>no PiSugar wired</span></div>
+          <div class="hw-bar"><div class="hw-bar-fill" style="width:${pct}%;background:#d6a740"></div></div>
+          <div class="hw-row"><span>${pct.toFixed(0)}%</span><span>plug a real PiSugar to enable</span></div>
+        `;
+      } else {
+        battEl.innerHTML = '<span style="color:#8a96a3">no PiSugar detected · install the daemon and seat the UPS</span>';
       }
     }
 
-    // Host metrics (RAM/CPU/temp/uptime)
+    // Host metrics — these are ALWAYS real (read from psutil + /sys/class/thermal)
     const hostUl = document.getElementById('hw-host');
     if (hostUl) {
       const uptime = formatUptime(sys.uptime_s || 0);
-      const cpuDot = (sys.cpu_pct ?? 0) > 85 ? 'warn' : 'ok';
-      const tempDot = (sys.temp_c ?? 0) > 75 ? 'warn' : ((sys.temp_c ?? 0) > 0 ? 'ok' : 'bad');
-      const memDot = (sys.mem_pct ?? 0) > 85 ? 'warn' : 'ok';
+      const cpu = sys.cpu_pct ?? 0;
+      const load = sys.load_1 ?? 0;
+      const mem = sys.mem_pct ?? 0;
+      const temp = sys.temp_c ?? 0;
+      const cpuDot = cpu > 85 ? 'warn' : 'ok';
+      const tempDot = temp > 75 ? 'warn' : (temp > 0 ? 'ok' : 'bad');
+      const memDot = mem > 85 ? 'warn' : 'ok';
+      // Use 1 decimal on CPU so an idle Pi doesn't always look "0%" — the
+      // value updates every probe interval (default 2 s).
       hostUl.innerHTML = [
-        `<li><span class="hw-name"><span class="hw-dot ${cpuDot}"></span>CPU</span><span class="hw-val">${(sys.cpu_pct ?? 0).toFixed(0)}%  ld ${(sys.load_1 ?? 0).toFixed(2)}</span></li>`,
-        `<li><span class="hw-name"><span class="hw-dot ${memDot}"></span>RAM</span><span class="hw-val">${(sys.mem_used_mb ?? 0).toFixed(0)} / ${(sys.mem_total_mb ?? 0).toFixed(0)} MB (${(sys.mem_pct ?? 0).toFixed(0)}%)</span></li>`,
-        `<li><span class="hw-name"><span class="hw-dot ${tempDot}"></span>Temp</span><span class="hw-val">${(sys.temp_c ?? 0).toFixed(1)} °C</span></li>`,
+        `<li><span class="hw-name"><span class="hw-dot ${cpuDot}"></span>CPU</span><span class="hw-val">${cpu.toFixed(1)}%  ld ${load.toFixed(2)}</span></li>`,
+        `<li><span class="hw-name"><span class="hw-dot ${memDot}"></span>RAM</span><span class="hw-val">${(sys.mem_used_mb ?? 0).toFixed(0)} / ${(sys.mem_total_mb ?? 0).toFixed(0)} MB (${mem.toFixed(0)}%)</span></li>`,
+        `<li><span class="hw-name"><span class="hw-dot ${tempDot}"></span>Temp</span><span class="hw-val">${temp.toFixed(1)} °C</span></li>`,
         `<li><span class="hw-name"><span class="hw-dot ok"></span>Uptime</span><span class="hw-val">${uptime}</span></li>`,
       ].join('');
     }
 
+    // A small heartbeat indicator so the user can see the panel IS updating,
+    // even when an idle Pi reports the same CPU% twice in a row.
     const ageEl = document.getElementById('hw-scan-age');
-    if (ageEl) ageEl.textContent = `scan age ${(hw.last_scan_age_s ?? 0).toFixed(1)}s`;
+    if (ageEl) {
+      const spin = ['·', '∙', '•', '∙'][_hwTickCount % 4];
+      ageEl.textContent = `${spin} probe scan age ${(hw.last_scan_age_s ?? 0).toFixed(1)}s · ticks ${_hwTickCount}`;
+    }
   }
 
   function formatUptime(s) {
